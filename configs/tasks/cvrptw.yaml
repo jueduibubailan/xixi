@@ -1,0 +1,84 @@
+# Alternative task entry point (same task as the root `task.yaml`).
+#
+#   uv run cvrp start configs/tasks/cvrptw.yaml
+#
+# The canonical configuration lives at the project root so that
+#   uv run cvrp start task.yaml
+# reads like CORAL's `coral start -c task.yaml`. This file exists to show the
+# other supported layout: a task under `configs/tasks/`.
+#
+# Two anchors matter, and both are resolved from the *invocation* directory, so
+# this file behaves identically to the root one:
+#   * relative paths here (e.g. `../../problems/...`) resolve against the task
+#     file's own directory first, then the project root;
+#   * `problem.slug` selects the problem directory, which ships inside the
+#     package, so nothing variant-specific needs repeating in a task file.
+#
+# Keep this in sync with `task.yaml` by editing only what differs: the paths.
+
+task:
+  name: "CVRPTW-on-POMO"
+  slug: "cvrptw"
+  description: |
+    Synthesize a POMO-based CVRPTW solver by modifying the *input, state and
+    masking* of the existing POMO CVRP implementation, while keeping the
+    pretrained checkpoint loadable.
+
+    The full description, the tips and the stage list live in the root
+    `task.yaml`; this file only demonstrates the alternate config location.
+
+problem:
+  slug: "cvrptw"
+
+llm:
+  backend: "claude_code"
+  model: "deepseek-flash"
+
+grader:
+  direction: "maximize"
+  timeout: 900
+  args:
+    require_feasible: true
+    iterations: 100
+    require_solution_dump: true
+
+loop:
+  on: ["code_error", "code_revise"]
+  until: "contract_passed"
+  max_rounds: 5
+
+stages:
+  - name: analysis
+    kind: agent
+    role: "src/cvrp/roles/analysis_agent.md"
+    schema: "problems/cvrptw/schemas/analysis.schema.json"
+    produces: ["artifacts/analysis/analysis.json"]
+    timeout_seconds: 1800
+  - name: code_generation
+    kind: agent
+    role: "src/cvrp/roles/code_generation_agent.md"
+    produces: ["artifacts/generated/run.py"]
+    timeout_seconds: 3600
+  - name: code_error
+    kind: executor
+    role: "src/cvrp/roles/code_error_agent.md"
+    produces: ["artifacts/runs/s3_run_report.json"]
+    steps: [py_compile, smoke_run, full_run]
+  - name: code_revise
+    kind: agent
+    role: "src/cvrp/roles/code_revise_agent.md"
+    produces: ["artifacts/revisions/"]
+    timeout_seconds: 3600
+  - name: feasibility
+    kind: executor
+    role: "src/cvrp/roles/feasibility_agent.md"
+    produces: ["artifacts/runs/s5_feasibility.json"]
+
+workspace:
+  results_dir: "../../results"
+  final_dir: "../../workspace/final"
+
+run:
+  verbose: true
+  ui: false
+  session: "local"

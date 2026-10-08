@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>cvrp — CVRPTW synthesis dashboard</title>
+<link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+<header>
+  <div class="brand"><span class="dot"></span> cvrp</div>
+  <div class="meta" id="meta">loading…</div>
+  <div class="spacer"></div>
+  <select id="run-select" title="run"></select>
+  <span class="pill" id="live">live</span>
+</header>
+
+<main>
+  <section class="card" id="overview">
+    <h2>Run</h2>
+    <div class="grid">
+      <div><label>status</label><div id="v-status" class="big">—</div></div>
+      <div><label>round</label><div id="v-round" class="big">—</div></div>
+      <div><label>best cost</label><div id="v-best" class="big">—</div></div>
+      <div><label>initial cost</label><div id="v-initial" class="big">—</div></div>
+      <div><label>grader score</label><div id="v-score" class="big">—</div></div>
+      <div><label>feasible</label><div id="v-feasible" class="big">—</div></div>
+    </div>
+    <div class="path" id="v-run-dir">—</div>
+    <div class="path" id="v-coral">—</div>
+  </section>
+
+  <section class="card">
+    <h2>Pipeline</h2>
+    <ol class="stages" id="stages"></ol>
+  </section>
+
+  <section class="card">
+    <h2>Artifacts</h2>
+    <div class="file-grid">
+      <ul class="files" id="files"></ul>
+      <div class="viewer">
+        <div class="viewer-head"><span id="file-name">select a file</span>
+          <button id="copy-btn" type="button">copy</button></div>
+        <pre id="file-body">—</pre>
+      </div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Logs</h2>
+    <div class="log-head">
+      <select id="log-select"></select>
+      <button id="log-refresh" type="button">refresh</button>
+      <span class="path" id="log-path"></span>
+    </div>
+    <pre id="log-body">—</pre>
+  </section>
+
+  <section class="card">
+    <h2>Steer the next stage</h2>
+    <p class="hint">Queued instructions are handed to the next stage that matches the target
+      (or to the next stage of any kind). Use it to redirect a revise round without stopping the run.</p>
+    <div class="steer">
+      <select id="steer-stage">
+        <option value="">any stage</option>
+        <option value="analysis">analysis</option>
+        <option value="code_generation">code_generation</option>
+        <option value="code_revise">code_revise</option>
+      </select>
+      <input id="steer-text" placeholder="e.g. keep the encoder input dim at 2; load the checkpoint with strict=False" />
+      <button id="steer-btn" type="button">queue</button>
+    </div>
+  </section>
+</main>
+
+<footer>cvrp · analysis → code generation → error → revise → feasibility</footer>
+<script src="/static/app.js"></script>
+</body>
+</html>

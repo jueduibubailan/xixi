@@ -1,0 +1,50 @@
+# Global defaults for every `cvrp start` run.
+#
+# Precedence: task.yaml  >  configs/default.yaml  >  built-in defaults.
+# Any key may also be overridden on the command line with dotlist syntax:
+#   uv run cvrp start task.yaml llm.model=sonnet stages.0.timeout_seconds=600
+#
+# Variant-specific values (prompts, generated layout, CLI flags, data, checks) do
+# NOT belong here -- they live in problems/<slug>/problem.yaml, selected by
+# `problem.slug` in the task file.
+
+llm:
+  backend: "claude_code"
+  runtime: "claude_code"
+  model: "deepseek-flash"
+  claude_bin: "claude"
+  max_turns: 0
+  permission_mode: "auto"
+  extra_args: []
+  # Credentials and routing come from the shell by default: a model name that is not
+  # native to Anthropic only works when ANTHROPIC_BASE_URL points at a router, and
+  # stripping it produces a "Failed to authenticate ... 403" that looks like a bad
+  # key. Set false to run isolated from the caller's environment.
+  inherit_routing_env: true
+  env: {}
+  timeout_seconds: 3600
+
+loop:
+  on: ["code_error", "code_revise"]
+  until: "contract_passed"
+  max_rounds: 5
+
+grader:
+  direction: "maximize"
+  timeout: 900
+  args:
+    # Iteration budget handed to the generated program's full run. Kept modest so
+    # a repair round is cheap; raise it once a solver is fast enough to earn it.
+    iterations: 100
+    # Fail rather than silently accept a run whose solution was never verified.
+    require_solution_dump: true
+    require_feasible: true
+
+workspace:
+  results_dir: "./results"
+  final_dir: "./workspace/final"
+
+run:
+  verbose: true
+  ui: false
+  session: "local"

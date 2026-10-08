@@ -1,0 +1,64 @@
+[project]
+name = "cvrp"
+version = "0.1.0"
+description = "CVRP-variant code synthesis pipeline: analysis agent -> code generation agent -> error agent -> revise agent, built on POMO, orchestrated CORAL-style."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    # Intentionally minimal. `yaml` parses task configs; starlette/uvicorn serve
+    # the dashboard. CORAL-style dotlist overrides are implemented in
+    # `cvrp.config.apply_overrides`, so omegaconf is not needed.
+    "pyyaml>=6.0",
+    "starlette>=0.40.0",
+    "uvicorn>=0.30.0",
+]
+
+[project.optional-dependencies]
+# NOTE: CORAL is deliberately NOT a declared dependency.
+#
+# `coral_adapter` detects it with importlib.find_spec and degrades to the built-in
+# launcher when it is absent, so hard-requiring it would buy nothing and cost a
+# fragile build (CORAL ships no wheel on the default index). To enable the thin
+# shell in a run, install it into this project's environment once:
+#
+#     uv pip install -e ../CORAL1
+#
+# `uv run cvrp validate` then reports "CORAL 0.5.0 ... (runtime OK)" instead of
+# "CORAL not importable".
+dev = ["pytest>=8.0.0", "ruff>=0.5.0", "httpx>=0.27"]
+
+[project.scripts]
+cvrp = "cvrp.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cvrp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# `src` for the package under test; `.` so tests can import the shared helpers in
+# tests/conftest.py by name (`from tests.conftest import write_project`).
+pythonpath = ["src", "."]
+# No pytest cache: the project directory is the only reliably writable scratch
+# space in this environment, and the cache adds nothing here.
+addopts = "-p no:cacheprovider"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = [
+    # Problem baseline payloads are upstream code we do not own: a problem ships
+    # the reference implementation it modifies (see problems/*/pomo). Linting or
+    # reformatting it would create a diff against upstream for no benefit, and the
+    # agents are supposed to modify it, not us.
+    "problems/*/pomo",
+    "src/cvrp/problems/*/pomo",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+ignore = ["E501"]

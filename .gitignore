@@ -1,0 +1,37 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+*.egg-info/
+
+# Test scratch. The suite writes here instead of the system temp dir, which is
+# not reliably writable in confined environments (see tests/conftest.py).
+.test-tmp/
+.pytest-tmp/
+pytest-cache-files-*/
+
+# Runtime output: every `cvrp start` creates results/<task>/<timestamp>/.
+results/
+
+# Generated instances, reproducible from the selected problem's instances.py.
+# Keep the generator; the .json/.vrp payloads are throwaway.
+instances/data/
+
+# S6 export target. Re-created on every successful run.
+workspace/final/*
+!workspace/final/.gitkeep
+
+# Agents' scratch working copies.
+workspace/worktrees/
+
+# Large binary payloads that exist in two places on purpose:
+#   * `baseline/checkpoints/`  -- shared, for any problem that wants to point at it
+#   * `src/cvrp/problems/<slug>/checkpoints/` -- the shipped example's own copy,
+#     so that a problem directory is self-contained
+# Both are the same POMO CVRP100 checkpoint. Commit one of them (the shared copy
+# is the better candidate); the other is reproducible from it.
+# **/checkpoints/*.pt

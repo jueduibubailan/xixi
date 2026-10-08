@@ -1,0 +1,130 @@
+# CVRPTW problem spec.
+#
+# Read by `cvrp.problems.load_problem`. This file is the *only* place a VRP
+# variant is described: change it (plus the prompts and checks.py next to it) and
+# the engine will synthesize a solver for a different variant without any change
+# under src/cvrp/{pipeline,executor,web}.
+
+slug: cvrptw
+name: "Capacitated VRP with Time Windows"
+kind: vrp
+variant_label: "CVRPTW-on-POMO"
+
+# `task.yaml:problem.dir` overrides this location; by default the engine looks for
+# a directory carrying a problem.yaml, first in <project>/problems/<slug>/ and then
+# inside the installed package.
+checks: checks.py
+
+prompts:
+  analysis: prompts/s1_analysis.md
+  analysis_judge: prompts/s1_analysis_judge.md
+  codegen: prompts/s2_codegen.md
+  codegen_judge: prompts/s2_codegen_judge.md
+  error_analyse: prompts/s4_error_analyse.md
+  revise: prompts/s4_revise.md
+
+# Extra "Available inputs" text injected into every generated CVPR.md.
+agent_context: problem_context.md
+
+# What the generated package looks like.
+generated:
+  dir: artifacts/generated
+  program: run.py
+  required: [run.py]
+  modules:
+    - CVRPTWProblemDef.py
+    - CVRPTWEnv.py
+    - CVRPTWModel.py
+    - CVRPTWTrainer.py
+    - CVRPTWTester.py
+  entries:
+    train: train_n20.py
+    test: test_n20.py
+  files:
+    - CVRPTWProblemDef.py
+    - CVRPTWEnv.py
+    - CVRPTWModel.py
+    - CVRPTWTrainer.py
+    - CVRPTWTester.py
+    - train_n20.py
+    - test_n20.py
+    - run.py
+    - README.md
+  # Dimensions the code generation prompt quotes. Documentation for the agent, not
+  # something the engine enforces.
+  dimensions:
+    encoder_embedding: 128
+    decoder_hidden: 128
+    problem_size: 20
+    pomo_size: 20
+    aug_factor: 8
+
+# How to invoke the generated program. `null` means "this variant's program does
+# not take that flag".
+cli:
+  path_arg: "--path"
+  iteration_arg: "--iteration"
+  save_solution_arg: "--save-solution"
+  extra_args: []
+
+# What the program must print for the exit gate to score it. These are inherited
+# from AFL's textual contract; a variant may override either regex.
+program:
+  best_regex: 'the process is successful, the best cost is (\d+(?:\.\d+)?)'
+  initial_regex: 'the initial process is successful, the initial cost is (\d+(?:\.\d+)?)'
+  expected_lines:
+    - "the initial process is successful, the initial cost is {cost}"
+    - "the process is successful, the best cost is {cost}"
+  accepts: ["--path", "--iteration", "--save-solution"]
+
+# Where the run data comes from. `build_dataset` is implemented in checks.py and
+# delegates to instances.py.
+data:
+  dir: instances/data/cvrptw
+  instance_glob: "n20/*.json"
+  ready_marker: manifest.json
+  # Per-stage read-only inputs staged under `data/`. Stages already see every
+  # earlier stage's declared output; this adds extras (or narrows them).
+  stage_inputs:
+    code_revise:
+      - artifacts/analysis/analysis.json
+      - artifacts/generated
+      - artifacts/runs
+      - artifacts/revisions
+  generator: instances.py:build_dataset
+  sizes: [20]
+  count_per_size: 3
+  seed: 1234
+  capacity: 30.0
+  service_time: 0.05
+  # `horizon: null` derives the depot horizon from a canonical feasible schedule.
+  # A fixed value that is too small raises instead of emitting an infeasible
+  # instance -- see instances.py.
+  horizon: null
+  window_width_choices: [0.2, 0.4, 0.6]
+
+# The reference implementation the agents modify, staged into every worktree.
+# `baseline_dir` is resolved against the project root first and the problem
+# directory second, so a problem can either ship its payload next to its spec (as
+# this one does) or point at a shared location such as `./baseline`.
+resources:
+  baseline_dir: src/cvrp/problems/cvrptw
+  baseline_subdirs: [pomo, checkpoints]
+  checkpoint: checkpoints/checkpoint-30500.pt
+  notes: BASELINE_NOTES.md
+
+# Acceptance + scoring.
+acceptance:
+  require_solution_dump: true
+  solution_key: routes
+scorer:
+  kind: inverse_cost      # score = scale / best_cost
+  scale: 1.0
+  direction: maximize
+
+# Offline (no-model) backend behaviour. `analysis` is a real analysis payload for
+# this variant, and `template` is a genuinely runnable first-cut solver, so a
+# `llm.backend=mock` run exercises the contract and the checks for real.
+mock:
+  analysis: mock_analysis.json
+  template: mock_solver.py
