@@ -23,6 +23,147 @@ from pathlib import Path
 from cvrp.llm.base import LLMBackend, LLMResult
 from cvrp.problems import ProblemPlugin
 
+# --------------------------------------------------------------------------- #
+# the offline deliverable's shape
+# --------------------------------------------------------------------------- #
+
+#: POMO's own training budget. The mock reproduces it verbatim so the engine's
+#: correspondence gate really compares values on an offline run.
+POMO_TRAINER_PARAMS = """\
+    'problem_size': {n},
+    'pomo_size': {pomo},
+    'epochs': 8100,
+    'train_episodes': 10 * 1000,
+    'train_batch_size': 64,
+    'logging': {{
+        'model_save_interval': 500,
+        'img_save_interval': 500,
+        'log_image_params_1': {{
+            'json_foldername': 'log_image_style',
+            'filename': 'style_cvrp_20.json',
+        }},
+        'log_image_params_2': {{
+            'json_foldername': 'log_image_style',
+            'filename': 'style_loss_1.json',
+        }},
+    }},
+    'model_load': {{
+        'enable': False,  # the CVRP100 checkpoint is the starting point
+        # 'path': CHECKPOINT_DIR,  # directory path of pre-trained model and log files saved.
+        # 'epoch': 30500,  # epoch version of pre-trained model to laod.
+    }},
+"""
+
+POMO_TESTER_PARAMS = """\
+    'problem_size': {n},
+    'pomo_size': {pomo},
+    'test_episodes': 10 * 1000,
+    'test_batch_size': 1000,
+    'aug_factor': 8,
+    'aug_batch_size': 1000 * 8,
+    'logging': {{
+        'model_save_interval': 500,
+        'img_save_interval': 500,
+    }},
+"""
+
+
+def _mock_module(role: str, source: str, n: int, pomo: int) -> str:
+    """A stub standing in for an adapted baseline module.
+
+    It exists so the offline deliverable has the right *shape*: the file name, the
+    correspondence line, and the symbol a reader would look for. It deliberately
+    contains no solver logic -- `run.py` is the executable artifact offline, and the
+    real backend replaces these bodies with the adapted baseline code.
+    """
+    class_name = role[:-3] if role.endswith(".py") else role
+    return (
+        f"# baseline-correspondence: {source}\n"
+        '"""Offline stub emitted by `llm.backend: mock`.\n\n'
+        f"Stands in for the adapted `{source}`. The code-generation agent replaces this\n"
+        'body with the real adaptation; only the deliverable shape is modelled here.\n"""\n\n'
+        f"PROBLEM_SIZE = {n}\n"
+        f"POMO_SIZE = {pomo}\n\n\n"
+        f"class {class_name}:\n"
+        f'    """Placeholder for the adapted {source}."""\n\n'
+        "    def __init__(self, *args, **kwargs):\n"
+        "        self.args = args\n"
+        "        self.kwargs = kwargs\n\n"
+        "    def __repr__(self):\n"
+        f'        return "{class_name}(mock)"\n'
+    )
+
+
+def _mock_train_entry(source: str, n: int, pomo: int) -> str:
+    """A training entry point with POMO's parameter block, and no side effects.
+
+    Importable (the import probe runs it) and honest about being a stub: the training
+    loop is behind `__main__`, so nothing is trained when the file is merely read.
+    """
+    return (
+        "# baseline-correspondence: {source}\n"
+        '"""Offline stand-in for the training entry point."""\n\n'
+        "import argparse\n\n"
+        "PROBLEM_SIZE = {n}\n"
+        "POMO_SIZE = {pomo}\n\n"
+        "trainer_params = {{\n"
+        "{params}"
+        "}}\n\n"
+        "def main():\n"
+        '    parser = argparse.ArgumentParser(description="CVRP training (mock backend)")\n'
+        "    parser.parse_args()\n"
+        '    print("training is not run by the offline backend (problem_size=%d)" % PROBLEM_SIZE)\n'
+        "    return 0\n\n\n"
+        'if __name__ == "__main__":\n'
+        "    raise SystemExit(main())\n"
+    ).format(source=source, n=n, pomo=pomo, params=POMO_TRAINER_PARAMS.format(n=n, pomo=pomo))
+
+
+def _mock_test_entry(source: str, n: int, pomo: int) -> str:
+    """A test entry point that loads the checkpoint from a resolved path."""
+    return (
+        "# baseline-correspondence: {source}\n"
+        '"""Offline stand-in for the test entry point."""\n\n'
+        "import argparse\n"
+        "import os\n\n"
+        "PROBLEM_SIZE = {n}\n"
+        "POMO_SIZE = {pomo}\n\n"
+        "def _find_checkpoints_dir():\n"
+        "    here = os.path.dirname(os.path.abspath(__file__))\n"
+        "    for _ in range(6):\n"
+        "        candidate = os.path.join(here, 'checkpoints')\n"
+        "        if os.path.isdir(candidate):\n"
+        "            return candidate\n"
+        "        here = os.path.dirname(here)\n"
+        "    return 'checkpoints'\n\n"
+        "tester_params = {{\n"
+        "{params}"
+        "}}\n"
+        "tester_params['model_load'] = {{'path': _find_checkpoints_dir(), 'epoch': 30500}}\n\n"
+        "def main():\n"
+        '    parser = argparse.ArgumentParser(description="CVRP testing (mock backend)")\n'
+        "    parser.parse_args()\n"
+        '    print("testing is not run by the offline backend (problem_size=%d)" % PROBLEM_SIZE)\n'
+        "    return 0\n\n\n"
+        'if __name__ == "__main__":\n'
+        "    raise SystemExit(main())\n"
+    ).format(source=source, n=n, pomo=pomo, params=POMO_TESTER_PARAMS.format(n=n, pomo=pomo))
+
+
+def _mock_readme(program: str, correspondence: dict, n: int) -> str:
+    rows = ["| file | POMO source |", "|---|---|"]
+    for name, source in correspondence.items():
+        rows.append(f"| `{name}` | `{source}` |" if source else f"| `{name}` | (none) |")
+    return (
+        "# Generated CVRPTW deliverable (mock backend)\n\n"
+        "Emitted by `llm.backend: mock`. With the real backend the code-generation\n"
+        "agent adapts the POMO baseline and writes these files; only the deliverable\n"
+        "shape is modelled offline.\n\n"
+        "## Baseline correspondence\n\n" + "\n".join(rows) + "\n\n"
+        f"## Commands\n\n```\npython {program} --path <instance.json> --iteration 100\n"
+        f"python train_n{n}.py\npython test_n{n}.py\n```\n"
+    )
+
 
 def _stage_of(prompt: str) -> str:
     for marker in (
@@ -58,12 +199,23 @@ class MockBackend(LLMBackend):
     def _analysis_payload(self) -> dict:
         mock_spec = self._mock_spec()
         raw = mock_spec.get("analysis")
+        payload: dict | None = None
         if raw and self.problem is not None:
             path = Path(str(raw))
             if not path.is_absolute():
                 path = self.problem.root / path
             if path.is_file():
-                return json.loads(path.read_text(encoding="utf-8"))
+                payload = json.loads(path.read_text(encoding="utf-8"))
+        if payload is not None:
+            # The shipped payload is written for the problem's default size. When a
+            # task asks for a different scale, overwrite the size fields rather than
+            # leaving an n=20 analysis in an n=100 run -- the gate would pass and the
+            # offline run would describe the wrong problem.
+            if self.problem is not None:
+                payload["problem_size"] = self.problem.problem_size
+                payload["pomo_size"] = self.problem.scale.effective_pomo_size
+                payload["aug_factor"] = self.problem.scale.aug_factor
+            return payload
         # Minimal, honest placeholder: enough to satisfy the analysis gate's shape
         # checks, and explicitly flagged as generic so nobody mistakes it for a
         # real analysis of their variant.
@@ -82,9 +234,40 @@ class MockBackend(LLMBackend):
         }
 
     def _emit_solver(self, cwd: Path) -> list[str]:
+        """Write a deliverable that satisfies the generation contract offline.
+
+        With a real backend the code-generation agent produces the whole package. The
+        mock has to produce the *shape* as well, or it would be rejected by the
+        engine's own correspondence gate: every file adapted from POMO is named after
+        the problem, starts with its `# baseline-correspondence:` line, the training
+        entry point keeps POMO's own parameter block (so the gate's value checks are
+        exercised for real), and nothing extra is written.
+        """
         target = Path(cwd) / self._generated_dir()
         target.mkdir(parents=True, exist_ok=True)
-        template = self.problem.mock_template if self.problem is not None else None
+        problem = self.problem
+        program = problem.program if problem is not None else "run.py"
+        correspondence = problem.correspondence if problem is not None else {}
+        n = problem.problem_size if problem is not None else 20
+        pomo = problem.scale.effective_pomo_size if problem is not None else n
+        tag = problem.problem_tag if problem is not None else "CVRP"
+
+        written: list[str] = []
+        for name, source in correspondence.items():
+            if name in (program, "README.md"):
+                continue  # both are written below, and have no POMO source
+            path = target / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if name.startswith("train_"):
+                path.write_text(_mock_train_entry(source, n, pomo), encoding="utf-8")
+            elif name.startswith("test_"):
+                path.write_text(_mock_test_entry(source, n, pomo), encoding="utf-8")
+            else:
+                role = name[len(tag) :] if name.startswith(tag) else name
+                path.write_text(_mock_module(role, source, n, pomo), encoding="utf-8")
+            written.append(name)
+
+        template = problem.mock_template if problem is not None else None
         if template is None or not Path(template).is_file():
             body = (
                 "import argparse\n"
@@ -98,16 +281,12 @@ class MockBackend(LLMBackend):
             )
         else:
             body = Path(template).read_text(encoding="utf-8")
-        program = self.problem.program if self.problem is not None else "run.py"
         (target / program).write_text(body, encoding="utf-8")
-        (target / "README.md").write_text(
-            "# Generated solver (mock backend)\n\n"
-            "This placeholder is emitted by `llm.backend: mock` from the problem's\n"
-            "`mock.template`. With the real backend the code-generation agent writes\n"
-            "the full package here; see `problem.yaml:generated.files` for the list.\n",
-            encoding="utf-8",
-        )
-        return sorted(path.name for path in target.iterdir())
+        written.append(program)
+
+        (target / "README.md").write_text(_mock_readme(program, correspondence, n), encoding="utf-8")
+        written.append("README.md")
+        return sorted(written)
 
     # -- one turn ---------------------------------------------------------- #
 

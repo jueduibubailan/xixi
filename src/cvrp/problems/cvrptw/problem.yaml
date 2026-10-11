@@ -9,6 +9,8 @@ slug: cvrptw
 name: "Capacitated VRP with Time Windows"
 kind: vrp
 variant_label: "CVRPTW-on-POMO"
+# The identifier generated files are named after: `{problem}Env.py` -> `CVRPTWEnv.py`.
+tag: "CVRPTW"
 
 # `task.yaml:problem.dir` overrides this location; by default the engine looks for
 # a directory carrying a problem.yaml, first in <project>/problems/<slug>/ and then
@@ -20,6 +22,8 @@ prompts:
   analysis_judge: prompts/s1_analysis_judge.md
   codegen: prompts/s2_codegen.md
   codegen_judge: prompts/s2_codegen_judge.md
+  # The revise stage runs three turns: read the code, attribute the failure, repair.
+  code_review: prompts/s4_code_review.md
   error_analyse: prompts/s4_error_analyse.md
   revise: prompts/s4_revise.md
 
@@ -27,37 +31,60 @@ prompts:
 agent_context: problem_context.md
 
 # What the generated package looks like.
+#
+# Naming rule: every file adapted from POMO is named `{problem}{Role}.py`, and
+# carries a `# baseline-correspondence: <pomo path>` first line that the executor's
+# correspondence gate verifies. That is how "one-to-one with POMO" (renaming is
+# expected) and "no extra generated code" are both checkable without a human.
 generated:
   dir: artifacts/generated
   program: run.py
   required: [run.py]
+  prefix: "{problem}"
   modules:
-    - CVRPTWProblemDef.py
-    - CVRPTWEnv.py
-    - CVRPTWModel.py
-    - CVRPTWTrainer.py
-    - CVRPTWTester.py
+    - "{problem}ProblemDef.py"
+    - "{problem}Env.py"
+    - "{problem}Model.py"
+    - "{problem}Trainer.py"
+    - "{problem}Tester.py"
   entries:
-    train: train_n20.py
-    test: test_n20.py
+    # `{n}` is the task's problem size (task.yaml:scale.problem_size).
+    train: train_n{n}.py
+    test: test_n{n}.py
   files:
-    - CVRPTWProblemDef.py
-    - CVRPTWEnv.py
-    - CVRPTWModel.py
-    - CVRPTWTrainer.py
-    - CVRPTWTester.py
-    - train_n20.py
-    - test_n20.py
+    - "{problem}ProblemDef.py"
+    - "{problem}Env.py"
+    - "{problem}Model.py"
+    - "{problem}Trainer.py"
+    - "{problem}Tester.py"
+    - train_n{n}.py
+    - test_n{n}.py
     - run.py
     - README.md
+  # The authoritative one-to-one map. `null` marks a deliverable with no POMO
+  # source (so it must NOT carry a correspondence line). The correspondence gate
+  # fails when a declared deliverable is missing, when a `pomo/` source named here
+  # does not exist, or when a deliverable's declared first-line correspondence
+  # points somewhere other than its entry here.
+  correspondence:
+    "{problem}ProblemDef.py": "pomo/CVRProblemDef.py"
+    "{problem}Env.py": "pomo/POMO/CVRPEnv.py"
+    "{problem}Model.py": "pomo/POMO/CVRPModel.py"
+    "{problem}Trainer.py": "pomo/POMO/CVRPTrainer.py"
+    "{problem}Tester.py": "pomo/POMO/CVRPTester.py"
+    "train_n{n}.py": "pomo/POMO/train_n100.py"
+    "test_n{n}.py": "pomo/POMO/test_n100.py"
+    "run.py": null
+    "README.md": null
   # Dimensions the code generation prompt quotes. Documentation for the agent, not
-  # something the engine enforces.
+  # something the engine enforces -- except that the embedding widths must stay
+  # compatible with the pretrained checkpoint.
   dimensions:
     encoder_embedding: 128
     decoder_hidden: 128
-    problem_size: 20
-    pomo_size: 20
-    aug_factor: 8
+    problem_size: "{n}"
+    pomo_size: "{pomo}"
+    aug_factor: "{aug}"
 
 # How to invoke the generated program. `null` means "this variant's program does
 # not take that flag".
@@ -81,7 +108,7 @@ program:
 # delegates to instances.py.
 data:
   dir: instances/data/cvrptw
-  instance_glob: "n20/*.json"
+  instance_glob: "n{n}/*.json"
   ready_marker: manifest.json
   # Per-stage read-only inputs staged under `data/`. Stages already see every
   # earlier stage's declared output; this adds extras (or narrows them).
@@ -92,7 +119,10 @@ data:
       - artifacts/runs
       - artifacts/revisions
   generator: instances.py:build_dataset
-  sizes: [20]
+  # `sizes` is what the generator loops over. It defaults to the task's
+  # problem_size, so `scale.problem_size: 50` generates n50 instances without the
+  # task file repeating the number.
+  sizes: ["{n}"]
   count_per_size: 3
   seed: 1234
   capacity: 30.0
@@ -102,6 +132,13 @@ data:
   # instance -- see instances.py.
   horizon: null
   window_width_choices: [0.2, 0.4, 0.6]
+  # Larger instances need slack, or the "canonical schedule -> windows" construction
+  # has nothing to work with: the generator widens the windows and retries rather
+  # than raising. Tuned emprically so n=100 stays feasible on CPU-sized seeds.
+  slack:
+    small_width: 0.6
+    large_width: 1.2
+    retries: 8
 
 # The reference implementation the agents modify, staged into every worktree.
 # `baseline_dir` is resolved against the project root first and the problem
@@ -110,8 +147,32 @@ data:
 resources:
   baseline_dir: src/cvrp/problems/cvrptw
   baseline_subdirs: [pomo, checkpoints]
+  # `checkpoints/` is a *drop box*, not a shipped artifact: it starts empty and the
+  # user puts the weights they trained there. `test_n{n}.py` reads it (see
+  # `checkpoint_glob`) instead of a hardcoded filename, so shipping or renaming a
+  # checkpoint never requires editing generated code.
+  checkpoint_dir: checkpoints
+  checkpoint_glob: "checkpoint*.pt"
+  # Kept for documentation and for any tooling that wants "the reference weight".
+  # Nothing in the deliverable may depend on this exact filename.
   checkpoint: checkpoints/checkpoint-30500.pt
   notes: BASELINE_NOTES.md
+  # What the *export* carries besides the generated files.
+  #
+  # The generated code imports POMO's toolchain (`from pomo.POMO.utils.utils
+  # import ...`, `from pomo.CVRProblemDef import ...`) and its own modules by bare
+  # name, which only resolves when the directory holding `pomo/` is the working
+  # directory root. So the export mirrors that layout instead of flattening it, and
+  # ships `pomo/` alongside: a user who receives `workspace/final/<slug>/` can train
+  # and evaluate without hunting for the environment.
+  #
+  # `checkpoints/` is deliberately NOT here: it is the user's drop box for weights
+  # they produced by training, so the export leaves it out rather than filling it
+  # with a reference weight nobody asked for.
+  export:
+    mirror_root: "."
+    include: [pomo]
+    exclude: [result, __pycache__]
 
 # Acceptance + scoring.
 acceptance:

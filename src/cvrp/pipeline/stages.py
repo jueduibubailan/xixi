@@ -123,6 +123,19 @@ def stage_prompt_path(stage_config: dict[str, Any], config: dict[str, Any]) -> P
     return Path(raw) if raw else None
 
 
+def _scale_lines(problem: Any) -> str:
+    """One block describing the task's instance size, for the stage prompts."""
+    scale = problem.scale
+    return "\n".join(
+        [
+            f"  - problem_size (customers) = {scale.problem_size}",
+            f"  - depot + customers (an instance's `DIMENSION`) = {scale.problem_size + 1}",
+            f"  - pomo_size (parallel rollouts per instance) = {scale.effective_pomo_size}",
+            f"  - augmentation factor = {scale.aug_factor}",
+        ]
+    )
+
+
 def stage_variables(
     stage_config: dict[str, Any],
     config: dict[str, Any],
@@ -163,6 +176,14 @@ def stage_variables(
         "problem_name": problem.name if problem else "",
         "variant_label": str((problem.spec.get("variant_label") if problem else "") or ""),
         "problem_context": problem.agent_context() if problem else "",
+        # instance size -- the one number a task declares, spelled several ways
+        # because prompts refer to it in prose ("50 customers"), in file names
+        # (`train_n50.py`) and in the POMO rollout size.
+        "problem_size": str(problem.problem_size) if problem else "",
+        "problem_size_plus_depot": str(problem.problem_size + 1) if problem else "",
+        "pomo_size": str(problem.scale.effective_pomo_size) if problem else "",
+        "aug_factor": str(problem.scale.aug_factor) if problem else "",
+        "scale_lines": _scale_lines(problem) if problem else "",
         # generated package
         "generated_dir": generated_dir,
         "program": problem.program if problem else "run.py",
@@ -195,6 +216,8 @@ def stage_variables(
         "baseline_dir": str(resources.get("baseline_dir") or "baseline"),
         "baseline_notes": str(resources.get("notes") or "BASELINE_NOTES.md"),
         "checkpoint": str(resources.get("checkpoint") or ""),
+        "checkpoint_dir": str(resources.get("checkpoint_dir") or "checkpoints"),
+        "checkpoint_glob": str(resources.get("checkpoint_glob") or "checkpoint*.pt"),
         "resource_subdirs": ", ".join(str(item) for item in (resources.get("baseline_subdirs") or [])),
         # generic execution facts
         "python": "the interpreter running this project (`uv run` venv)",

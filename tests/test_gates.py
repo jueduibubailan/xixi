@@ -75,7 +75,7 @@ def test_generated_gate_requires_the_problem_entry_program(scratch: Path):
     (generated / "run.py").write_text("print('hi')", encoding="utf-8")
     result = gates.gate_generated(scratch, problem=PROBLEM)
     assert result.passed, result.issues
-    # the rest of the package is a warning, not a blocker
+    # the rest of the deliverable is a warning, not a blocker
     assert any("CVRPTWEnv.py" in warning for warning in result.warnings)
 
 
@@ -90,8 +90,14 @@ def test_generated_gate_falls_back_to_engine_defaults(scratch: Path):
 def test_expected_generated_files_splits_required_from_expected():
     required, expected = gates.expected_generated_files(PROBLEM)
     assert required == ("run.py",)
+    # the deliverable is exported under the problem's tag, one file per role
     assert "CVRPTWEnv.py" in expected
+    assert "CVRPTWModel.py" in expected
+    assert "train_n20.py" in expected
     assert "run.py" not in expected
+    # and it must not ask for a baseline-named copy or an untouched helper
+    assert "CVRPEnv.py" not in expected
+    assert "utils.py" not in expected
 
 
 def test_run_report_gate_reads_the_executor_report(scratch: Path):

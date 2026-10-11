@@ -71,16 +71,22 @@ gate:           gate_generated(problem=...)
 ```
 seed worktree:  worktrees/code_error/ + the generated package + data/instances/
 gate 1:         py_compile every .py under the generated dir
-gate 2:         <program> <cli.path_arg> <instance> <cli.iteration_arg> 5        (smoke)
-gate 3:         <program> ... <cli.iteration_arg> <iterations>                  (full)
+gate 2:         import_probe: import each generated module in its own subprocess,
+                from the package directory. Catches the two failures that syntax
+                checking cannot: a helper file never carried over from the baseline
+                (`utils.py` is the usual one), and an import of something not
+                installed. Both would otherwise appear as a traceback inside gate 3.
+gate 3:         <program> <cli.path_arg> <instance> <cli.iteration_arg> 5        (smoke)
+gate 4:         <program> ... <cli.iteration_arg> <iterations>                  (full)
 contract:       exit 0  AND  stdout matches problem.yaml:program.initial_regex
                 AND stdout matches problem.yaml:program.best_regex
 output:         artifacts/runs/s3_run_report.json   (+ s3_*.stdout.txt)
                 {passed, failed_step, error_class, error_message, revision_hint}
 ```
 
-`error_class` ∈ {timeout, contract_missing, initial_invalid, torch_load_error,
-shape_error, import_error, syntax_error, index_error, memory_error, ...}.
+`error_class` ∈ {missing_helper, timeout, contract_missing, initial_invalid,
+torch_load_error, shape_error, import_error, syntax_error, index_error,
+memory_error, agent_auth_error, ...}.
 `revision_hint` is the class-specific instruction the revise prompt reuses; the
 problem can override it per class via `checks.py:revision_hints`.
 

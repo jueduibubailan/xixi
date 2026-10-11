@@ -1,5 +1,266 @@
 # FAQ
 
+### Why is the deliverable named `CVRPTWEnv.py` instead of `CVRPEnv.py`?
+
+The deliverable is *named after the problem*, and the link to POMO is kept explicit
+instead of by filename:
+
+```
+artifacts/generated/
+├─ CVRPTWProblemDef.py   # baseline-correspondence: pomo/CVRProblemDef.py
+├─ CVRPTWEnv.py          # baseline-correspondence: pomo/POMO/CVRPEnv.py
+├─ CVRPTWModel.py        # baseline-correspondence: pomo/POMO/CVRPModel.py
+├─ CVRPTWTrainer.py      # baseline-correspondence: pomo/POMO/CVRPTrainer.py
+├─ CVRPTWTester.py       # baseline-correspondence: pomo/POMO/CVRPTester.py
+├─ train_n{n}.py         # baseline-correspondence: pomo/POMO/train_n100.py
+├─ test_n{n}.py          # baseline-correspondence: pomo/POMO/test_n100.py
+├─ run.py                # (no baseline source)
+└─ README.md             # (no baseline source)
+```
+
+Every file adapted from POMO starts with `# baseline-correspondence: <pomo path>`, and
+`problem.yaml:generated.correspondence` is the authoritative table. That is what makes
+"one-to-one with POMO" a *checkable* property rather than a claim.
+
+The same rule forbids **extra generated code**: a `.py` file the table does not list is
+a failure, `utils.py` is imported from the baseline in place rather than copied, and the
+file set does not grow.
+
+### What is the executor's `correspondence` gate?
+
+A static check that runs before anything is executed (see `steps` in `task.yaml`). It can
+fail a stage on its own, and it reports *every* finding -- failures and drift alike -- in
+`artifacts/runs/s3_run_report.json` under `findings`, so the revise agent can fix all of
+it in one round. It verifies:
+
+| check | verdict |
+|---|---|
+| every declared deliverable exists | fail |
+| every file adapted from POMO carries its `# baseline-correspondence:` line, pointing at the declared source | fail |
+| a declared POMO source does not exist in the staged baseline | fail |
+| a `.py` file outside the table (extra generated code) | fail |
+| the training entry point's `model_load` is `enable: False` with `path`/`epoch` commented out | fail |
+| `trainer_params` / `tester_params` keep POMO's values (below) | fail |
+| a deliverable name does not start with the problem tag | warning |
+
+The parameter values it pins, because they are conventions rather than choices:
+
+```
+epochs=8100, train_episodes=10*1000, train_batch_size=64,
+model_save_interval=500, img_save_interval=500,
+test_episodes=10*1000, test_batch_size=1000, aug_factor=8
+```
+
+Only `problem_size` / `pomo_size` follow the task's scale. A task that genuinely needs
+different values declares them under `generated.expected_params`.
+
+### Where does `test_n{n}.py` get its weights?
+
+From the **`checkpoints/` drop box**, which ships empty. The workflow is:
+
+```bash
+# 1. train -- the trainer writes its own weights under result/
+cd artifacts/generated && python train_n20.py
+
+# 2. move what you want evaluated into the drop box
+cp result/<timestamp>_train_.../checkpoint-<epoch>.pt ../checkpoints/
+
+# 3. evaluate -- test_* picks the highest epoch it finds there
+python test_n20.py
+```
+
+Resolution is two-level, at run time:
+
+1. an explicit `--model-path <dir or .pt file>` (or `MODEL_PATH`);
+2. the **highest epoch** among `checkpoint*.pt` in `checkpoints/`.
+
+Two consequences worth knowing:
+
+* **Nothing hardcodes a filename or an epoch.** That is the point of scanning: you decide
+  what goes in the drop box, and shipping or renaming a checkpoint never requires editing
+  generated code.
+* **The pretrained CVRP100 weight is not part of this pipeline's output.** This project
+  does not distribute `checkpoint-30500.pt` in the bundle; `train_n{n}.py` starts from
+  scratch (`model_load.enable: False`), and evaluation reads the drop box. If you want a
+  zero-shot comparison, put that file in `checkpoints/` yourself -- it will be picked by
+  the same scan.
+
+Implementation detail that is easy to get wrong: POMO's `CVRPTester` rebuilds the path as
+`'{path}/checkpoint-{epoch}.pt'`, so a directory needs the epoch **parsed out of the file
+name**, and a `.pt` file must come with its own directory as `path`. Pointing `path` at a
+file while leaving `epoch` at a default produces a path that does not exist.
+
+### What ends up in `workspace/final/<slug>/`?
+
+
+
+More than the generated files -- and that is deliberate, so the published directory runs
+without hunting for its dependencies:
+
+```
+workspace/final/<slug>/
+├─ artifacts/generated/          the 9 generated files
+│  ├─ CVRPTWProblemDef.py  CVRPTWEnv.py  CVRPTWModel.py
+│  ├─ CVRPTWTrainer.py  CVRPTWTester.py
+│  ├─ train_n{n}.py  test_n{n}.py  run.py  README.md
+└─ pomo/                         bundled runtime payload
+   ├─ CVRProblemDef.py
+   └─ POMO/{CVRPEnv,CVRPModel,CVRPTrainer,CVRPTester}.py
+      └─ utils/{utils.py, log_image_style/*.json}
+```
+
+Two reasons for this exact shape:
+
+* **It must mirror the worktree.** The generated code imports POMO's toolchain as
+  `pomo.…` and its own modules by bare name, which only resolves when the directory
+  holding `pomo/` is the root the program runs from. A flat copy would be unrunnable --
+  `ModuleNotFoundError` on the first import.
+* **`pomo/` is not "extra generated code".** The correspondence gate still applies to
+  `artifacts/generated/` only, which holds exactly the nine declared files. Bundling
+  happens in the export step, driven by `resources.export` in `problem.yaml`, and the
+  generation prompt forbids the agent from copying `pomo/` itself.
+
+`checkpoints/` is deliberately **not** bundled (16 MB, only useful for zero-shot
+evaluation); copy it in yourself if you want that. The export also appends a
+`## Running this bundle` section to the generated `README.md` with the exact commands.
+
+### Where do the plotting style files live, and what do their bounds mean?
+
+`pomo/POMO/utils/log_image_style/` -- shipped inside the problem payload **and** in every
+export (all of `pomo/` travels with the bundle). `utils.py` reads them relative to its
+**own** location:
+
+```python
+log_image_config_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), folder_name, file_name)
+```
+
+so `trainer_params['logging']['log_image_params_1']` must name a file that is actually
+there -- and it must **frame this run's data**.
+
+The shipped files are:
+
+| file | `ylim` | role |
+|---|---|---|
+| `style_cvrp_20.json` | `min: 0`, `max: null` | the objective curve -- cannot clip it |
+| `style_cvrp_100.json` | `min: 0`, `max: null` | identical to `style_cvrp_20.json`; safe to reference |
+| `style_loss_1.json` | `null`, `null` | the loss curve -- fully autoscaled |
+| `style_tsp_20.json` | `3.83`, `3.88` | TSP preset -- pinned, irrelevant to CVRP |
+
+`style_cvrp_100.json` deserves a note, because it is the file POMO's own `train_n100.py`
+names. Upstream ships it with `ylim` pinned to `10`..`30`, the window it chose for its
+CVRP-100 benchmark; a copy of this project originally carried that pin (and briefly did
+not carry the file at all). Both were wrong for the same reason: this pipeline trains
+from scratch, so the objective starts far above 30 once the scale grows (this problem's
+n=100 instances cost around 46, n=50 around 15.5), and a pinned window renders an
+**empty box rather than an error**. It is now shipped as an exact copy of
+`style_cvrp_20.json`, so referencing either name is safe.
+
+The general rule: `null` means autoscale and is always safe; a number is a framing
+decision that must contain the values this run actually produces. A pinned *upper* bound
+is the dangerous kind, so the executor's correspondence gate warns about any
+`ylim.max`/`xlim.max` that is not `null`. Renaming a style file, authoring a new one, or
+zeroing `img_save_interval` to skip plotting are all defects.
+
+### Who reviews the code for missing files and logic bugs?
+
+The revise agent, as the *first* of its three turns:
+
+1. **`s4_code_review.md`** -- read every file of the deliverable, compare it with the POMO
+   source it declares, and write `artifacts/reviews/code_review.{md,json}` with findings
+   (`missing_file`, `missing_symbol`, `logic_bug`, `path_defect`, `style_drift`,
+   `contract_risk`). No code changes in this turn.
+2. **`s4_error_analyse.md`** -- attribute the failure, combining the traceback with those
+   findings.
+3. **`s4_revise.md`** -- repair, fixing every high-severity finding rather than only the
+   one that crashed.
+
+The executor cannot do step 1: it has no model, and it can only run code and parse files.
+That is exactly why the review pass exists as its own turn.
+
+### `ModuleNotFoundError: No module named 'CVRProblemDef'` (or `'CVRPEnv'`)
+
+The baseline's modules import each other by **bare name** and therefore need three
+`sys.path` entries, which is what `run.py` must set up and what POMO's own
+`test_n100.py` achieves with two relative inserts from inside `pomo/POMO/`:
+
+| entry | needed for |
+|---|---|
+| the worktree root (the directory holding `pomo/`) | `from pomo.POMO.CVRPTester import ...` |
+| `pomo/` | `CVRPEnv.py`'s `from CVRProblemDef import ...` |
+| `pomo/POMO/` | the tester/trainer's `from CVRPEnv import ...` |
+
+Forgetting the second or third is the usual cause. `run.py` must resolve these by
+walking up from its own location, not with a hardcoded `"../.."`, because the
+exported copy is not always two levels deep.
+
+### How do I solve n=50 or n=100 instead of n=20?
+
+Declare the size in the task file — it is the single place `n` is written:
+
+```yaml
+scale:
+  problem_size: 50     # customers; an instance's DIMENSION is this + 1
+```
+
+Everything derived from it follows: the generated entry points become
+`train_n50.py` / `test_n50.py`, instances are generated under
+`instances/data/cvrptw/n50/`, the agents are told `problem_size = 50`, and the
+executor selects an n=50 instance. Ready-made examples ship with the project:
+
+```bash
+uv run cvrp instances task_n50.yaml                 # synthesize n50 data
+uv run cvrp start task_n50.yaml llm.backend=mock    # offline self-check
+uv run cvrp start task_n50.yaml                     # real run (n=50)
+uv run cvrp start task_n100.yaml                    # n=100
+```
+
+Things worth knowing:
+
+- The instance `DIMENSION` is `problem_size + 1` (index 0 is the depot), so n=50
+  consumes `DIMENSION : 51` files — the shape of `vrp/vrptw/50/1.vrp` — and n=100
+  consumes `DIMENSION : 101`.
+- The shipped checkpoint loads unchanged at every size (its encoder input is 2-D
+  and its attention is over nodes). It was trained on CVRP100, so n=100 is where
+  it contributes most and n=50 is a zero-shot transfer.
+- Several sizes coexist in one data directory: `manifest.json` records all of them
+  and a task only regenerates the size it needs.
+- If the data on disk is the wrong size, the executor **fails** with
+  `error_class: wrong_instance_size` instead of quietly scoring another problem.
+- Budget: n=50 is roughly 2.5x and n=100 roughly 5x the per-iteration cost of n=20
+  on CPU. The n50/n100 task files raise `grader.timeout` accordingly.
+
+### `ModuleNotFoundError` for a POMO helper, or `from CVRP.POMO.utils.utils import ...` fails
+
+Two things are going on, and both are fixed in the shipped spec.
+
+**The import path.** Upstream POMO imports its helpers as
+`from CVRP.POMO.utils.utils import ...`, because the upstream repository is named
+`CVRP`. In a stage worktree the baseline is staged as `pomo/` at the worktree root
+(with no `__init__.py`), so that prefix cannot resolve. The four baseline files
+that used it (`CVRPTrainer.py`, `CVRPTester.py`, `train_n100.py`, `test_n100.py`)
+now import `from pomo.POMO.utils.utils import ...`, which works once the **parent
+of `pomo/`** is on `sys.path` (implicit namespace packages mean no `__init__.py` is
+needed). Details are in the problem's `problem_context.md` and in
+`BASELINE_NOTES.md` §1.0.
+
+**The missing file.** `utils.py` was not listed under `generated.files` /
+`generated.modules`, so the code-generation agent had no reason to carry it over —
+even though the trainer, the tester and both entry points import it. It is declared
+now, and the S2 prompt states the rule explicitly ("carry the baseline's helper
+modules over; the package must be self-sufficient"), as does the S2 judge prompt.
+
+**Its dependencies were undeclared too.** `pomo/POMO/utils/utils.py` imports
+`pytz`, `numpy` and `matplotlib`; upstream POMO declares none of them. They are now
+dependencies of this project, so the baseline is importable out of the box. `torch`
+is deliberately not: the generated solver needs it, and installing it belongs in
+`task.yaml:workspace.setup`.
+
+**Why you now find out immediately.** The executor gained an `import_probe` gate
+between `py_compile` and the smoke run: it imports each generated module in its own
+subprocess, from the package directory. A missing helper or an unresolvable prefix
+fails there with `error_class: missing_helper` and a message naming the module and
+the missing name, instead of surfacing as a traceback inside `run.py`.
+
 ### `Failed to authenticate. API Error: 403 Request not allowed`
 
 Two different things produce this, and they need different fixes.

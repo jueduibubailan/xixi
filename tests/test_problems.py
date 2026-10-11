@@ -65,22 +65,64 @@ def test_prompt_paths_resolve_inside_the_problem():
 
 
 def test_agent_context_comes_from_the_problem():
-    """The context file is read from the problem directory, not the engine."""
+    """The context file is read from the problem directory, not the engine.
+
+    It is rendered with the task scale on the way out, so the comparison is
+    against the file with its scale placeholders substituted.
+    """
     plugin = load_problem(PACKAGE_PROBLEMS / "cvrptw", slug="cvrptw")
     context = plugin.agent_context()
-    assert context == (plugin.root / "problem_context.md").read_text(encoding="utf-8").strip()
+    raw = (plugin.root / "problem_context.md").read_text(encoding="utf-8").strip()
+    assert context == plugin.render(raw).strip()
     assert "checkpoint" in context.lower()
     assert "data/instances" in context
+    # the default scale is substituted, not left as braces
+    assert "{n}" not in context
+    assert "problem_size (customers) = 20" in context
 
 
 def test_generated_layout_is_declared_by_the_problem():
     plugin = load_problem(PACKAGE_PROBLEMS / "cvrptw", slug="cvrptw")
     paths = plugin.generated_paths
     assert "artifacts/generated/run.py" in paths
-    assert "artifacts/generated/CVRPTWEnv.py" in paths
+    # the deliverable is named after the problem, one file per baseline role
+    tag = plugin.problem_tag
+    assert tag == "CVRPTW"
+    assert f"artifacts/generated/{tag}Env.py" in paths
+    assert f"artifacts/generated/{tag}Model.py" in paths
+    assert f"artifacts/generated/{tag}ProblemDef.py" in paths
     # required_paths are *names* relative to the generated dir; generated_paths
     # are run-relative, because that is where the run directory keeps them
     assert plugin.required_paths == ["run.py"]
+
+
+def test_the_deliverable_is_one_to_one_with_pomo():
+    """One entry per baseline role, plus the CLI and its README -- nothing more.
+
+    The naming rule is `{problem}<Role>.py`; a baseline-named file (`CVRPEnv.py`)
+    would mean the agent edited a copy instead of exporting under the problem tag,
+    and an undeclared file would be extra generated code.
+    """
+    plugin = load_problem(PACKAGE_PROBLEMS / "cvrptw", slug="cvrptw")
+    generated = plugin.spec["generated"]
+    tag = plugin.problem_tag
+
+    assert "utils.py" not in generated["files"]
+    assert "pomo/POMO/utils/utils.py" not in generated["files"]
+
+    for name in generated["files"]:
+        if name in {"run.py", "README.md"} or name.startswith(("train_n", "test_n")):
+            continue
+        assert name.startswith(tag), f"{name} is not named after {tag}"
+
+    # every declared deliverable is adapted from a real baseline file
+    pomo = PACKAGE_PROBLEMS / "cvrptw" / "pomo"
+    for name, source in plugin.correspondence.items():
+        if source is None:
+            continue
+        assert (pomo / Path(source).relative_to("pomo")).is_file(), f"{source} is not in the baseline"
+        if name not in {"run.py", "README.md"}:
+            assert name.startswith(tag) or name.startswith(("train_n", "test_n"))
 
 
 def test_cli_args_are_built_from_the_spec():
@@ -255,6 +297,100 @@ def test_scaffold_produces_a_loadable_problem(scratch: Path):
     # the description is embedded in the prompts, so the agents see the variant
     assert "drones" in Path(plugin.prompt("analysis")).read_text(encoding="utf-8")
     assert "drones" in Path(plugin.prompt("codegen")).read_text(encoding="utf-8")
+
+
+def test_the_staged_baseline_is_importable_as_staged():
+    """The staged layout must actually work, helpers included.
+
+    Upstream POMO imports its helpers as ``from CVRP.POMO.utils.utils import ...``
+    because the upstream repository is named ``CVRP``. The staging directory is
+    called ``pomo/``, so that prefix cannot resolve. A baseline whose imports cannot
+    be followed teaches the agent to copy a broken import, which then fails at the
+    executor with ``ModuleNotFoundError`` - and the failure looks like the agent's
+    fault rather than the baseline's.
+    """
+    import importlib
+    import sys
+
+    pomo = PACKAGE_PROBLEMS / "cvrptw" / "pomo"
+    assert (pomo / "POMO" / "utils" / "utils.py").is_file(), "the helper must ship with the baseline"
+
+    offenders = [
+        str(path.relative_to(pomo))
+        for path in sorted(pomo.rglob("*.py"))
+        if "from CVRP." in path.read_text(encoding="utf-8")
+        or "import CVRP." in path.read_text(encoding="utf-8")
+    ]
+    assert not offenders, f"baseline files still use the upstream package name: {offenders}"
+
+    # `pomo.POMO.utils.utils` needs the *parent* of `pomo/` on sys.path: `pomo` is
+    # an implicit namespace package, and the parent is what the generation prompt
+    # tells the agent to bootstrap.
+    sys.path.insert(0, str(pomo.parent))
+    try:
+        module = importlib.import_module("pomo.POMO.utils.utils")
+        assert hasattr(module, "create_logger")
+        assert hasattr(module, "copy_all_src")
+    finally:
+        sys.path.remove(str(pomo.parent))
+        for name in list(sys.modules):
+            if name == "pomo" or name.startswith("pomo."):
+                del sys.modules[name]
+
+
+def test_the_spec_and_prompts_encode_the_deliverable_contract():
+    """The strategy: adapt POMO in place, export it under the problem's name."""
+    plugin = load_problem(PACKAGE_PROBLEMS / "cvrptw", slug="cvrptw")
+    files = (plugin.spec.get("generated") or {}).get("files") or []
+    assert "utils.py" not in files
+    assert "pomo/POMO/utils/utils.py" not in files
+
+    codegen = Path(plugin.prompt("codegen")).read_text(encoding="utf-8")
+    for phrase in (
+        "Edit the baseline in place",
+        "under its new name",
+        "baseline-correspondence",
+        "Match the existing style",
+        "Nothing else belongs",
+        "must stay commented out",
+        "Do not tune them down",
+    ):
+        assert phrase in codegen, f"the generation prompt lost its '{phrase}' rule"
+    # and the old "same relative path" framing must be gone
+    assert "package of cooperating modules" not in codegen
+    assert "same relative path" not in codegen
+    assert "Carry the baseline's helper modules over" not in codegen
+
+    context = plugin.agent_context()
+    assert "What the deliverable may contain" in context
+    assert "CVRPTWEnv.py" in context
+    # the deliverable tree is shown with the concrete directory, not a placeholder
+    # (`{generated_dir}` is a stage variable and would not be substituted here)
+    assert "{generated_dir}" not in context
+
+
+def test_judge_and_revise_prompts_share_the_deliverable_rules():
+    plugin = load_problem(PACKAGE_PROBLEMS / "cvrptw", slug="cvrptw")
+    judge = Path(plugin.prompt("codegen_judge")).read_text(encoding="utf-8")
+    assert "File set and naming" in judge
+    assert "named after the *baseline*" in judge
+    assert "Correspondence lines" in judge
+    assert "Parameter values" in judge
+    assert "Style fidelity" in judge
+
+    revise = Path(plugin.prompt("revise")).read_text(encoding="utf-8")
+    assert "may **not** add a new module" in revise
+    assert "already installed" in revise
+    assert "correspondence" in revise
+
+    analyse = Path(plugin.prompt("error_analyse")).read_text(encoding="utf-8")
+    assert "path problem, not a missing package" in analyse
+    assert "FileNotFoundError" in analyse
+
+    review = Path(plugin.prompt("code_review")).read_text(encoding="utf-8")
+    assert "Read every file in the deliverable" in review
+    assert "missing_symbol" in review
+    assert "Do not edit any code in this step" in review
 
 
 def test_scaffold_prompts_render_through_the_engine(scratch: Path):

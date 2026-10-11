@@ -95,19 +95,19 @@ stages:
   - name: code_generation
     kind: agent
     role: "src/cvrp/roles/code_generation_agent.md"
-    produces: ["artifacts/generated/run.py"]
+    produces: ["artifacts/generated/"]
     timeout_seconds: 3600
 
   - name: code_error
     kind: executor            # no LLM
     role: "src/cvrp/roles/code_error_agent.md"
     produces: ["artifacts/runs/s3_run_report.json"]
-    steps: [py_compile, smoke_run, full_run]
+    steps: [py_compile, import_probe, smoke_run, full_run]
 
   - name: code_revise
     kind: agent
     role: "src/cvrp/roles/code_revise_agent.md"
-    produces: ["artifacts/revisions/"]
+    produces: ["artifacts/revisions/", "artifacts/reviews/"]
     timeout_seconds: 3600
 
   - name: feasibility
@@ -140,6 +140,14 @@ grader:
 workspace:
   results_dir: "./results"
   final_dir: "./workspace/final"
+  # The executor runs the generated program with *this* project's interpreter
+  # (sys.executable), not with whatever `python` is first on PATH. The generated
+  # POMO solver needs torch, so it is installed here rather than assumed.
+  # `uv pip install` is a fast no-op once satisfied, and this whole block runs only
+  # when its text changes (fingerprinted under .cvrp/setup.json), or with
+  # `cvrp start ... run.setup=force`.
+  setup:
+    - "uv pip install torch --index-url https://download.pytorch.org/whl/cpu"
 
 run:
   verbose: true

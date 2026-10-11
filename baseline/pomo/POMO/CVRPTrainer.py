@@ -8,7 +8,7 @@ from CVRPModel import CVRPModel as Model
 from torch.optim import Adam as Optimizer
 from torch.optim.lr_scheduler import MultiStepLR as Scheduler
 
-from CVRP.POMO.utils.utils import *
+from pomo.POMO.utils.utils import *
 
 
 class CVRPTrainer:

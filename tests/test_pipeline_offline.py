@@ -44,12 +44,12 @@ stages:
   - name: code_generation
     kind: agent
     role: "src/cvrp/roles/code_generation_agent.md"
-    produces: ["artifacts/generated/run.py"]
+    produces: ["artifacts/generated/"]
   - name: code_error
     kind: executor
     role: "src/cvrp/roles/code_error_agent.md"
     produces: ["artifacts/runs/s3_run_report.json"]
-    steps: [py_compile, smoke_run, full_run]
+    steps: [py_compile, import_probe, smoke_run, full_run]
   - name: code_revise
     kind: agent
     role: "src/cvrp/roles/code_revise_agent.md"
@@ -117,7 +117,16 @@ def test_pipeline_completes_offline(project: Path, monkeypatch: pytest.MonkeyPat
 
     report = json.loads((run_dir / "artifacts" / "runs" / "s3_run_report.json").read_text(encoding="utf-8"))
     assert report["passed"], report.get("error_message")
-    assert [step["name"] for step in report["steps"]] == ["py_compile", "smoke_run", "full_run"]
+    assert [step["name"] for step in report["steps"]] == [
+        "py_compile",
+        "import_probe",
+        "correspondence",
+        "smoke_run",
+        "full_run",
+    ]
+    # the static findings ride along even when every gate passed, so the revise agent
+    # can fix drift in the same round as a real failure
+    assert "findings" in report
 
     feasibility = json.loads((run_dir / "artifacts" / "runs" / "s5_feasibility.json").read_text(encoding="utf-8"))
     assert feasibility["feasible"], feasibility.get("violations")
@@ -129,8 +138,11 @@ def test_pipeline_completes_offline(project: Path, monkeypatch: pytest.MonkeyPat
     assert bundle["feasible"] is True
     assert bundle["score"] > 0
 
-    # S6 export + human report
-    assert (project / "workspace" / "final" / "tiny" / "run.py").is_file()
+    # S6 export + human report. The export mirrors the worktree layout so the
+    # generated code's `pomo.…` imports resolve, and it bundles `pomo/` alongside.
+    final = project / "workspace" / "final" / "tiny"
+    assert (final / "artifacts" / "generated" / "run.py").is_file()
+    assert (final / "pomo" / "POMO" / "utils" / "utils.py").is_file()
     assert (run_dir / "REPORT.md").is_file()
 
 
@@ -160,19 +172,23 @@ def test_instances_are_generated_by_the_problem(project: Path, monkeypatch: pyte
     assert manifest["instances"][0]["problem_size"] == 20
 
 
-def test_partial_package_is_a_warning_not_a_failure(project: Path, monkeypatch: pytest.MonkeyPatch):
-    """The problem's generated.files list is an expectation, not a requirement.
+def test_a_missing_deliverable_file_is_a_warning_at_the_gate(project: Path, monkeypatch: pytest.MonkeyPatch):
+    """The generated-files list is an expectation at the *gate*, not a requirement.
 
-    Only the entry program is required; the rest are warnings. Requirement creep
-    here would turn a runnable solver into a hard failure.
+    The strict version of this lives in the executor's correspondence check, which
+    fails the stage; the gate stays permissive so a hand-run replay of a partial
+    package can still be inspected rather than being rejected outright.
     """
     monkeypatch.chdir(project)
     config = load_config(project / "task.yaml", cwd=project)
     result = start(config, results_dir=project / "results")
     run_dir = Path(result["run_dir"])
+    generated = run_dir / "worktrees" / "code_generation" / "artifacts" / "generated"
+    (generated / "CVRPTWProblemDef.py").unlink(missing_ok=True)
+
     gate = gates.gate_generated(run_dir, run_dir / "worktrees" / "code_generation", config["_problem"])
     assert gate.passed, gate.issues
-    assert any("CVRPTWEnv.py" in warning for warning in gate.warnings)
+    assert any("CVRPTWProblemDef.py" in warning for warning in gate.warnings)
     assert (run_dir / "artifacts" / "runs" / "s3_run_report.json").is_file()
 
 

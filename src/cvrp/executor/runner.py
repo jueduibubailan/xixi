@@ -1,12 +1,14 @@
 """Stage executor: the "code error agent".
 
 Responsibilities:
-* run the three gates (compile -> smoke run -> full run)
+* run the gate sequence (compile -> import -> correspondence -> smoke -> full run)
 * apply the acceptance contract
 * classify failures into a stable error class + a message the revise agent can act on
 * persist ``artifacts/runs/s3_run_report.json`` plus raw stdout for post-mortems
 
-It never edits code and never calls an LLM.
+It never edits code and never calls an LLM. The correspondence gate is the
+deterministic half of "the deliverable is one-to-one with POMO"; the semantic half
+(reading the code for missing symbols and logic bugs) is the revise agent's job.
 """
 
 from __future__ import annotations
@@ -23,11 +25,14 @@ from cvrp.executor.contract import (
     classify_error,
     condense,
     find_instances,
+    import_probe,
     py_compile,
+    require_instance_size,
     run_program,
     save_stdout,
     write_run_report,
 )
+from cvrp.executor.correspondence import CorrespondenceReport, correspondence_step
 
 SMOKE_ITERATIONS = 5
 FULL_ITERATIONS = 1000
@@ -48,6 +53,7 @@ def run_checks(
     smoke_iterations: int = SMOKE_ITERATIONS,
     full_iterations: int = FULL_ITERATIONS,
     extra_hints: dict[str, str] | None = None,
+    problem: Any | None = None,
 ) -> dict[str, Any]:
     """Execute the gate sequence and return the run report payload."""
     run_dir = Path(run_dir)
@@ -57,29 +63,56 @@ def run_checks(
     compile_step = py_compile(run_dir, worktree)
     steps.append(compile_step)
 
+    # An import pass sits between "it parses" and "it runs": a missing helper file
+    # is a much cheaper failure to explain here than as a traceback inside run.py.
     if compile_step.passed:
-        instance = _first_instance(instances_dir, instance_size, instance_glob)
-        smoke = run_program(
-            run_dir=run_dir,
-            worktree=worktree,
-            contract=contract,
-            instance=instance,
-            iteration=smoke_iterations,
-            name="smoke_run",
-        )
-        steps.append(smoke)
-        if smoke.passed:
-            full = run_program(
+        probe = import_probe(run_dir, worktree)
+        steps.append(probe)
+
+    # The deliverable's shape is checked before anything is executed: one-to-one with
+    # POMO, no extra generated code, POMO's training budget, and a training entry
+    # point that does not try to load a checkpoint. All of it is static, so it also
+    # runs on a deliverable that would otherwise be fine to execute.
+    correspondence: CorrespondenceReport | None = None
+    if compile_step.passed:
+        corr_step, correspondence = correspondence_step(run_dir, worktree, problem)
+        steps.append(corr_step)
+
+    if compile_step.passed and all(step.passed for step in steps):
+        candidates = find_instances(instances_dir, instance_size, instance_glob)
+        # Refuse to run on the wrong problem size. `find_instances` prefers a
+        # size-named folder but falls back to whatever exists, and a silent
+        # fallback would score a different problem than the task declared.
+        wrong_size = require_instance_size(candidates, instance_size, name="instance_size")
+        if wrong_size is not None:
+            steps.append(wrong_size)
+        instance = candidates[0] if candidates else None
+        if wrong_size is None:
+            smoke = run_program(
                 run_dir=run_dir,
                 worktree=worktree,
                 contract=contract,
                 instance=instance,
-                iteration=full_iterations,
-                name="full_run",
+                iteration=smoke_iterations,
+                name="smoke_run",
             )
-            steps.append(full)
+            steps.append(smoke)
+            if smoke.passed:
+                full = run_program(
+                    run_dir=run_dir,
+                    worktree=worktree,
+                    contract=contract,
+                    instance=instance,
+                    iteration=full_iterations,
+                    name="full_run",
+                )
+                steps.append(full)
 
-    passed = bool(steps) and all(step.passed for step in steps) and len(steps) == 3
+    # All gates must have run and passed, and the sequence must have reached the
+    # end (or the dedicated size guard). Counting the steps makes "a gate was
+    # skipped" a failure too, which matters because the sequence short-circuits.
+    reached_end = bool(steps) and steps[-1].name in {"full_run", "instance_size"}
+    passed = reached_end and all(step.passed for step in steps)
     failed = next((step for step in steps if not step.passed), None)
 
     for step in steps:
@@ -108,6 +141,16 @@ def run_checks(
         },
     }
 
+    # Every finding from the static checks, not just the failing ones, so the revise
+    # agent can fix style/naming/correspondence drift in the same round instead of
+    # discovering it one failure at a time.
+    if correspondence is not None:
+        payload["findings"] = {
+            "issues": list(correspondence.issues),
+            "warnings": list(correspondence.warnings),
+            "checked": correspondence.checked,
+        }
+
     # A dedicated hint keeps the revise prompt short: AFL needed several rounds of
     # "analyze then fix"; encoding the known failure modes up front saves turns.
     # The problem's own hints override the generic ones for its error classes.
@@ -121,6 +164,20 @@ def _revision_hint(payload: dict[str, Any], extra_hints: dict[str, str] | None =
     if error_class and extra_hints and error_class in extra_hints:
         return str(extra_hints[error_class])
     hints = {
+        "correspondence": (
+            "The deliverable's shape is wrong. Every file adapted from POMO must be named "
+            "`{problem}<Role>.py` and start with `# baseline-correspondence: <pomo path>`; "
+            "no `.py` file may exist that `generated.correspondence` does not list; the "
+            "training entry point's `model_load` must keep `path`/`epoch` commented out; "
+            "and the trainer/tester parameters must keep POMO's own values."
+        ),
+        "missing_helper": (
+            "The generated package cannot import itself: a helper file was not carried "
+            "over from the baseline (the logging/plotting `utils` module is the usual "
+            "one), or a third-party import is not one the baseline uses. Copy the "
+            "helper into the generated directory, or bootstrap sys.path so "
+            "`pomo.POMO.utils.utils` resolves."
+        ),
         "timeout": "Reduce per-step work (vectorize the hot loop, avoid python loops over batch*pomo) "
                    "or lower the default iteration count. If training is the bottleneck, cut training steps.",
         "contract_missing": "The program must print the two contract lines with exactly the wording the "

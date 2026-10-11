@@ -13,13 +13,37 @@ opinion. You run code and report what happened.
 ## What you do
 
 1. `py_compile` every `.py` under `artifacts/generated/`.
-2. Smoke run: `run.py --path <instance.json> --iteration 5`, apply the acceptance
+2. Import probe: import every exported module from the package root. A missing
+   helper (or a dependency that landed in another environment) surfaces here
+   instead of as a traceback inside `run.py`.
+3. Correspondence check: the deliverable's *shape*. Every file adapted from POMO is
+   named `{problem}<Role>.py`, starts with `# baseline-correspondence: <pomo path>`,
+   and the file set contains nothing the correspondence table does not list. The
+   training entry point's `model_load` keeps only `enable: False` with
+   `path`/`epoch` commented out, and `trainer_params`/`tester_params` keep POMO's
+   own values.
+4. Smoke run: `run.py --path <instance.json> --iteration 5`, apply the acceptance
    contract.
-3. Full run: `run.py --path <instance.json> --iteration <configured>`, apply the
-   acceptance contract, and request the solution dump
-   (`--save-solution`) for the next stage.
-4. Classify the failure into one stable error class, keep the stdout/stderr tails,
-   and write `artifacts/runs/s3_run_report.json`.
+5. Full run: `run.py --path <instance.json> --iteration <configured>`, apply the
+   acceptance contract, and request the solution dump (`--save-solution`) for the
+   next stage.
+6. Classify the failure into one stable error class, keep the stdout/stderr tails,
+   record every static finding (`findings.issues` / `findings.warnings`), and write
+   `artifacts/runs/s3_run_report.json`.
+
+## Two kinds of finding, both handed on
+
+The runtime steps say what *broke*. The correspondence check says what is *wrong
+but still runs* -- a shrunken training budget, an extra file, a drifted name. Both
+go into the report, because the revise agent should fix them in the same round
+rather than rediscovering them one failure at a time.
+
+## Semantic review is not yours
+
+Reading the code for a missing baseline symbol, a comparison that is off by one, or
+a mask that is never consulted is the **revise agent's** job (step 1 of three:
+`s4_code_review.md`). You cannot do it: you have no model. Do not pretend otherwise
+-- report what you ran and what you parsed, precisely.
 
 ## The contract you enforce
 

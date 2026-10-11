@@ -40,6 +40,7 @@ from cvrp.pipeline import gates
 from cvrp.pipeline.stages import StageOutcome, run_agent_stage
 from cvrp.problems import ProblemPlugin
 from cvrp.run.run_dir import append_log, make_run_dir, read_json, write_json
+from cvrp.run.setup import run_setup
 from cvrp.run.state import DONE, FAILED, RunState
 from cvrp.run.worktree import collect_artifacts, read_baseline, seed_worktree
 
@@ -84,6 +85,21 @@ class Orchestrator:
             print(f"[cvrp] {message}")
 
     # -- preparation -------------------------------------------------------- #
+
+    def ensure_setup(self) -> None:
+        """Materialize whatever the task says the environment needs.
+
+        Runs before any stage, because a missing runtime dependency (torch for the
+        generated solver) would otherwise surface as an `import_error` inside the
+        code error stage and read like the agent's mistake.
+        """
+        if (self.config.get("run") or {}).get("setup", True) in (False, "false", "skip"):
+            self.log("setup: skipped by run.setup=false")
+            return
+        result = run_setup(self.config, force=bool(self.config.get("_setup_force")), log=self.log)
+        for line in result.lines():
+            if line.startswith("setup:"):
+                self.log(line)
 
     def ensure_instances(self) -> None:
         """Ask the problem to materialize its data if it is not there yet."""
@@ -200,6 +216,7 @@ class Orchestrator:
             instance_glob=self.problem.instance_glob,
             full_iterations=iterations,
             extra_hints=self.problem.revision_hints(),
+            problem=self.problem,
         )
         # NOTE: run_checks writes into the canonical run directory, so nothing may
         # be "collected" from the worktree afterwards. The executor worktree has no
@@ -243,8 +260,28 @@ class Orchestrator:
             "error_message": str(report.get("error_message") or "")[:6000],
             "revision_hint": str(report.get("revision_hint") or ""),
             "run_report_path": "artifacts/revisions/round-%d-brief.json" % round_index,
+            "findings_lines": _findings_lines(report),
         }
         instructions = self.state.consume_instructions("code_revise")
+
+        # Turn 1: read the code. The executor's gate only knows what it can run and
+        # parse; the semantic problems (a baseline symbol that never made it across,
+        # a mask that is never consulted, a plotting path that cannot resolve) are
+        # found by reading. Doing it first means the repair turn fixes a reviewed
+        # list instead of guessing from one error message.
+        review_config = dict(stage_config)
+        review_config["prompt_key"] = "code_review"
+        run_agent_stage(
+            review_config,
+            self.config,
+            self.run_dir,
+            worktree,
+            self.backend,
+            instructions,
+            round_index,
+            extra_variables=extra_variables,
+        )
+
         outcome = run_agent_stage(
             stage_config,
             self.config,
@@ -256,7 +293,7 @@ class Orchestrator:
             extra_variables=extra_variables,
         )
         generated = self._generated_rel()
-        self._collect(worktree, [generated, "artifacts/revisions"])
+        self._collect(worktree, [generated, "artifacts/revisions", "artifacts/reviews"])
         gate = gates.gate_generated(
             self.run_dir, worktree, self.problem, baseline=read_baseline(worktree)
         )
@@ -264,7 +301,11 @@ class Orchestrator:
             "code_revise",
             status=DONE if gate.passed else FAILED,
             message=f"round {round_index}: {gate.describe()}",
-            artifacts=[f"artifacts/revisions/round-{round_index}-brief.json", generated],
+            artifacts=[
+                f"artifacts/revisions/round-{round_index}-brief.json",
+                "artifacts/reviews/",
+                generated,
+            ],
             error="" if gate.passed else "; ".join(gate.issues[:3]),
         )
         self._note_outcome(outcome, gate)
@@ -314,6 +355,7 @@ class Orchestrator:
     def run(self) -> dict[str, Any]:
         self.log(f"run: {self.run_dir}")
         self.log(f"CORAL shell: {coral_info().describe()}")
+        self.ensure_setup()
         self.ensure_instances()
         self.state.record_event("run_start", run_dir=str(self.run_dir), problem=self.problem.slug)
         self.state.save()
@@ -404,15 +446,113 @@ class Orchestrator:
         }
 
     def _export(self) -> Path:
+        """Publish the run: the generated files, plus the runtime payload they need.
+
+        The export mirrors the *worktree* layout rather than flattening it, because
+        the generated code resolves its dependencies by relative position: it imports
+        POMO's toolchain as `pomo.…` and its own modules by bare name, which only
+        works when the directory holding `pomo/` is the root the program runs from.
+        A flat copy would be unreadable *and* unrunnable -- `ModuleNotFoundError` on
+        the first import.
+
+        The support payload comes from `resources.export` (plus `workspace.export`),
+        so the same mechanism works for any problem that ships a reference
+        implementation. Unchanged baseline sources are still not part of
+        `artifacts/generated/`; this only decides what travels with the run.
+        """
         generated = self.run_dir / self._generated_rel()
-        self.final_dir.mkdir(parents=True, exist_ok=True)
-        target = self.final_dir / self.slug
-        if target.exists():
-            shutil.rmtree(target, ignore_errors=True)
+        spec = self._export_spec()
+        mirror = (self.final_dir / self.slug).resolve()
+        if mirror.exists():
+            shutil.rmtree(mirror, ignore_errors=True)
+        mirror.mkdir(parents=True, exist_ok=True)
+
+        target = mirror / self._generated_rel()
         if generated.is_dir():
-            shutil.copytree(generated, target)
+            _copy_tree_filtered(generated, target)
         self.log(f"exported final code to {target}")
-        return target
+
+        for item in spec["include"]:
+            source = Path(item) if Path(item).is_absolute() else self._baseline_root() / item
+            if not source.exists():
+                self.log(f"  export: {item} declared but not found at {source}; skipped")
+                continue
+            destination = mirror / Path(item).name
+            _copy_tree_filtered(source, destination, exclude=spec["exclude"])
+            self.log(f"  export: bundled {item} ({_describe_tree(destination)})")
+
+        self._extend_export_readme(mirror, spec)
+        return mirror
+
+    def _baseline_root(self) -> Path:
+        """Where `resources.export` entries are resolved from."""
+        raw = (self.problem.spec.get("resources") or {}).get("baseline_dir")
+        if not raw:
+            return self.problem.root
+        candidate = resolve_path(self.config, str(raw))
+        return candidate if candidate.is_dir() else self.problem.root
+
+    def _export_spec(self) -> dict[str, Any]:
+        """Merge `resources.export` with any `workspace.export` override."""
+        resources = self.problem.spec.get("resources") or {}
+        raw = resources.get("export") or {}
+        spec: dict[str, Any] = {
+            "mirror_root": str(raw.get("mirror_root") or "."),
+            "include": [str(item) for item in (raw.get("include") or [])],
+            "exclude": [str(item) for item in (raw.get("exclude") or [])] or ["__pycache__"],
+        }
+        override = (self.config.get("workspace") or {}).get("export") or {}
+        if isinstance(override, dict):
+            if override.get("include") is not None:
+                spec["include"] = [str(item) for item in override["include"]]
+            if override.get("exclude") is not None:
+                spec["exclude"] = [str(item) for item in override["exclude"]]
+            if override.get("mirror_root") is not None:
+                spec["mirror_root"] = str(override["mirror_root"])
+        return spec
+
+    def _extend_export_readme(self, mirror: Path, spec: dict[str, Any]) -> None:
+        """Append the operational section: how to run what was just exported.
+
+        Written here rather than required from the agent because it describes the
+        *bundle*, not the code: it depends on what the export actually carried.
+        """
+        readme = mirror / self._generated_rel() / "README.md"
+        bundle_lines = [
+            "",
+            "## Running this bundle",
+            "",
+            "This directory is self-contained: run everything **from this directory**, so",
+            "that `pomo/` (bundled next to `artifacts/generated/`) resolves as the generated",
+            "code expects.",
+            "",
+            "```bash",
+            "# evaluate / improve on one instance",
+            f"python {self._generated_rel()}/{self.problem.program} --path <instance.json> --iteration 100",
+            "",
+            "# train (writes checkpoints and logs under artifacts/generated/result/)",
+            f"cd {self._generated_rel()} && python {self._entry_name('train')}",
+            "",
+            "# evaluate the model you just trained (test_* prefers the newest",
+            "# checkpoint under result/, falling back to a pretrained one if you place it",
+            "# in checkpoints/)",
+            f"cd {self._generated_rel()} && python {self._entry_name('test')}",
+            "```",
+            "",
+            "Bundled runtime payload: " + (", ".join(f"`{item}`" for item in spec["include"]) or "(none)"),
+            "",
+        ]
+        text = "# Generated deliverable\n\n(see the code-generation summary below)\n"
+        if readme.is_file():
+            text = readme.read_text(encoding="utf-8")
+        if "## Running this bundle" in text:
+            return
+        readme.parent.mkdir(parents=True, exist_ok=True)
+        readme.write_text(text.rstrip() + "\n" + "\n".join(bundle_lines), encoding="utf-8")
+
+    def _entry_name(self, kind: str) -> str:
+        entries = (self.problem.spec.get("generated") or {}).get("entries") or {}
+        return str(entries.get(kind) or f"{kind}.py")
 
     def _write_report(self, success: bool, reason: str) -> Path:
         analysis = read_json(self.run_dir / gates.ANALYSIS_REL, default={}) or {}
@@ -575,6 +715,50 @@ class Orchestrator:
         return lines
 
 
+def _copy_tree_filtered(source: Path, target: Path, exclude: list[str] | None = None) -> None:
+    """Copy a tree, dropping cache directories and named exclusions.
+
+    `__pycache__` and `*.pyc` are meaningless in an export, and a reference
+    implementation may hold training output (`result/`) that would balloon the
+    bundle with logs and intermediate weights.
+    """
+    blocked = set(exclude or []) | {"__pycache__"}
+    if target.exists():
+        shutil.rmtree(target, ignore_errors=True)
+    shutil.copytree(
+        source,
+        target,
+        ignore=shutil.ignore_patterns(*blocked, "*.pyc"),
+        dirs_exist_ok=True,
+    )
+
+
+def _describe_tree(path: Path) -> str:
+    if path.is_file():
+        return f"{path.stat().st_size} B"
+    files = [item for item in path.rglob("*") if item.is_file()]
+    total = sum(item.stat().st_size for item in files)
+    return f"{len(files)} file(s), {total / 1024:.0f} KiB"
+
+
+def _findings_lines(report: dict[str, Any]) -> str:
+    """The executor's static findings, as prompt-ready lines.
+
+    The gate only *fails* on some of them; the rest are drift the revise agent should
+    fix while it is already in the file. Rendering both keeps the repair turn from
+    being followed by a second, near-identical round.
+    """
+    findings = report.get("findings") or {}
+    issues = list(findings.get("issues") or [])
+    warnings = list(findings.get("warnings") or [])
+    lines: list[str] = []
+    lines.extend(f"  - FAIL: {item}" for item in issues)
+    lines.extend(f"  - note: {item}" for item in warnings)
+    if not lines:
+        return "  (the executor's static checks found nothing)"
+    return "\n".join(lines)
+
+
 def _serializable_config(config: dict[str, Any]) -> dict[str, Any]:
     """Drop the live plugin object before writing the config to disk."""
     return {key: value for key, value in config.items() if not key.startswith("_")}
@@ -636,6 +820,7 @@ def replay_stage(
         raise FileNotFoundError(f"run directory not found: {run_dir}")
 
     orchestrator = Orchestrator(config, results_dir=results_dir, run_dir=run_dir)
+    orchestrator.ensure_setup()
     orchestrator.ensure_instances()
     orchestrator.state.record_event("stage_replay", stage=stage)
     orchestrator.log(f"replay: stage {stage} in {run_dir}")
