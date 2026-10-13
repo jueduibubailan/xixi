@@ -31,6 +31,49 @@ DEFAULT_SERVICE_TIME = 0.05
 # Depot horizon. ``None`` means "derive it from the canonical schedule".
 DEFAULT_HORIZON: float | None = None
 
+# Window slack. The canonical schedule visits customers in a random order; the
+# windows derived from it are only *tight* enough to be interesting if the
+# canonical order and a length-sorted order happen to agree. At n=20 the two nearly
+# coincide; by n=100 the spread of arrival times means the smallest they can be is
+# the depot round-trip, so the generator widens the windows and retries instead of
+# raising. See ``generate_instance``.
+DEFAULT_BASE_SLACK = 0.10
+DEFAULT_SLACK_GROWTH = 0.55
+DEFAULT_BASE_WIDTH = 0.02
+DEFAULT_WINDOW_RETRIES = 8
+
+
+def _as_float(value: Any, fallback: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _slack_settings(spec: dict[str, Any] | None = None) -> dict[str, float]:
+    """Read the generator's slack parameters, with per-size defaults.
+
+    ``data.slack`` in ``problem.yaml`` may override any of them; anything it does
+    not name is derived from the problem size.
+    """
+    spec = spec or {}
+    raw = spec.get("slack") or {}
+    if not isinstance(raw, dict):
+        raw = {}
+    size = int(_as_float(raw.get("problem_size") or spec.get("problem_size") or 20, 20))
+    if size >= 80:
+        base_slack, growth = 0.35, 1.20
+    elif size >= 40:
+        base_slack, growth = 0.20, 0.85
+    else:
+        base_slack, growth = DEFAULT_BASE_SLACK, DEFAULT_SLACK_GROWTH
+    return {
+        "base_slack": _as_float(raw.get("base_slack"), base_slack),
+        "slack_growth": _as_float(raw.get("slack_growth"), growth),
+        "base_width": _as_float(raw.get("base_width"), DEFAULT_BASE_WIDTH),
+        "retries": max(1, int(_as_float(raw.get("retries"), DEFAULT_WINDOW_RETRIES))),
+    }
+
 
 def generate_instance(
     problem_size: int = 20,
@@ -38,18 +81,24 @@ def generate_instance(
     capacity: float = DEFAULT_CAPACITY,
     service_time: float = DEFAULT_SERVICE_TIME,
     horizon: float | None = None,
+    *,
+    base_slack: float = DEFAULT_BASE_SLACK,
+    slack_growth: float = DEFAULT_SLACK_GROWTH,
+    base_width: float = DEFAULT_BASE_WIDTH,
 ) -> dict[str, Any]:
     """Build one instance dict with ``problem_size + 1`` nodes (index 0 = depot).
 
     The canonical schedule is computed first and the windows follow from it:
 
-    * ``ready`` = canonical arrival time (clamped to >= 0), so the order is
-      reachable without waiting and never earlier than physically possible;
-    * ``due``   = arrival + a jittered slack, so the order is admissible and early
-      customers do not force the vehicle to wait for late ones.
+    * ``ready`` = canonical arrival time minus a margin, so the order is reachable
+      without being unreasonably early;
+    * ``due``   = arrival + ``base_width`` (arrival - margin) * (1 + slack_growth),
+      so the order is admissible and the windows are proportional to the actual
+      travel times rather than to an arbitrary constant.
 
-    The jitter is sampled first and the schedule derived from it, so window
-    tightness is controlled rather than accidental.
+    ``base_slack``/``slack_growth``/``base_width`` control window tightness. They
+    are parameters rather than constants because the same construction has to work
+    at n=20 and n=100: see ``_slack_settings``.
     """
     rng = random.Random(seed)
 
@@ -66,7 +115,6 @@ def generate_instance(
 
     order = list(range(1, problem_size + 1))
     rng.shuffle(order)
-    slack_ratio = rng.uniform(0.10, 0.25)
 
     time_windows: list[list[float]] = [[0.0, 0.0]]  # the depot window is set below
     arrivals: dict[int, float] = {}
@@ -84,11 +132,11 @@ def generate_instance(
         current = node
 
     for node in range(1, problem_size + 1):
-        arrive = arrivals[node]
-        ready = round(max(0.0, arrive - 0.02), 4)
-        due = round(arrive + max(0.05, slack_ratio * max(0.05, arrive)), 4)
+        arrive = max(0.0, arrivals[node] - base_width * 0.5)
+        ready = round(arrive, 4)
+        due = round(arrive + base_width + base_slack * max(base_width, arrive) * (1.0 + slack_growth), 4)
         if due <= ready:
-            due = round(ready + 0.05, 4)
+            due = round(ready + base_width, 4)
         time_windows.append([ready, due])
 
     schedule_end = max(
@@ -133,7 +181,51 @@ def generate_instance(
             f"generated an infeasible instance ({instance['name']}): {check['violations']}"
         )
     instance["meta"]["reference_cost"] = check["cost"]
+    instance["meta"]["window_slack"] = {
+        "base_slack": round(base_slack, 4),
+        "slack_growth": round(slack_growth, 4),
+        "base_width": round(base_width, 4),
+    }
     return instance
+
+
+def generate_feasible_instance(
+    problem_size: int = 20,
+    seed: int = 0,
+    capacity: float = DEFAULT_CAPACITY,
+    service_time: float = DEFAULT_SERVICE_TIME,
+    horizon: float | None = None,
+    spec: dict[str, Any] | None = None,
+    **overrides: Any,
+) -> dict[str, Any]:
+    """Like :func:`generate_instance`, but never gives up on feasibility.
+
+    The window construction can legitimately fail: a window layout that admits the
+    canonical order, the length-sorted order *and* the pipeline's checker does not
+    always exist at a fixed slack. Rather than surfacing that as a data error in
+    the middle of a run, each retry widens the windows until the self-check passes.
+    """
+    settings = {**_slack_settings({**(spec or {}), **{"problem_size": problem_size}}), **overrides}
+    last_error: Exception | None = None
+    for attempt in range(int(settings["retries"])):
+        factor = 1.0 + attempt
+        try:
+            return generate_instance(
+                problem_size=problem_size,
+                seed=seed,
+                capacity=capacity,
+                service_time=service_time,
+                horizon=horizon,
+                base_slack=float(settings["base_slack"]) * factor,
+                slack_growth=float(settings["slack_growth"]) * factor,
+                base_width=float(settings["base_width"]),
+            )
+        except (RuntimeError, ValueError) as exc:
+            last_error = exc
+    raise RuntimeError(
+        f"could not synthesize a feasible n={problem_size} instance after "
+        f"{int(settings['retries'])} attempts with widening windows; last error: {last_error}"
+    )
 
 
 def _self_check(instance: dict[str, Any]) -> dict[str, Any]:
@@ -192,6 +284,7 @@ def generate_instances(
     capacity: float = DEFAULT_CAPACITY,
     service_time: float = DEFAULT_SERVICE_TIME,
     horizon: float | None = None,
+    spec: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Deterministically build ``count_per_size`` instances per size."""
     sizes = sizes or [20]
@@ -199,12 +292,13 @@ def generate_instances(
     for size in sizes:
         for offset in range(count_per_size):
             instance_seed = seed + size * 100 + offset
-            instance = generate_instance(
+            instance = generate_feasible_instance(
                 problem_size=size,
                 seed=instance_seed,
                 capacity=capacity,
                 service_time=service_time,
                 horizon=horizon,
+                spec=spec,
             )
             instance["name"] = f"cvrptw_n{size}_{offset:02d}"
             instance["meta"]["seed"] = instance_seed
@@ -259,27 +353,38 @@ def write_instance_vrp(instance: dict[str, Any], path: Path) -> Path:
     return path
 
 
-def write_manifest(instances: list[dict[str, Any]], root: Path) -> Path:
-    """Index file so agents and the executor can enumerate instances cheaply."""
+def _manifest_entry(instance: dict[str, Any]) -> dict[str, Any]:
+    size = int(instance["problem_size"])
+    return {
+        "name": instance["name"],
+        "problem_size": size,
+        "capacity": instance["capacity"],
+        "horizon": instance["horizon"],
+        "json": f"n{size}/{instance['name']}.json",
+        "vrp": f"n{size}/{instance['name']}.vrp",
+        "reference_cost": instance["meta"].get("reference_cost"),
+    }
+
+
+def write_manifest(
+    instances: list[dict[str, Any]],
+    root: Path,
+    existing: list[dict[str, Any]] | None = None,
+) -> Path:
+    """Index file so agents and the executor can enumerate instances cheaply.
+
+    ``existing`` carries entries for sizes this call did not regenerate, so the
+    data directory can hold several problem sizes at once (n20, n50, n100) without
+    one run's manifest erasing another's.
+    """
     root = Path(root)
-    entries = []
-    for instance in instances:
-        size = int(instance["problem_size"])
-        entries.append(
-            {
-                "name": instance["name"],
-                "problem_size": size,
-                "capacity": instance["capacity"],
-                "horizon": instance["horizon"],
-                "json": f"n{size}/{instance['name']}.json",
-                "vrp": f"n{size}/{instance['name']}.vrp",
-                "reference_cost": instance["meta"].get("reference_cost"),
-            }
-        )
+    entries = list(existing or []) + [_manifest_entry(instance) for instance in instances]
+    entries.sort(key=lambda entry: (int(entry.get("problem_size") or 0), str(entry.get("name") or "")))
     payload = {
         "problem": "cvrptw",
         "generator": "cvrp.problems.cvrptw.instances",
         "count": len(entries),
+        "sizes": sorted({int(entry.get("problem_size") or 0) for entry in entries}),
         "instances": entries,
     }
     target = root / "manifest.json"
@@ -309,14 +414,26 @@ def build_dataset(
     params = dict(spec or {})
     out_dir = Path(out_dir)
     manifest = out_dir / "manifest.json"
-    if manifest.is_file() and not force:
-        cached = json.loads(manifest.read_text(encoding="utf-8"))
-        if cached.get("count"):
-            return []
+    requested_sizes = sizes or [int(v) for v in (params.get("sizes") or [20])]
+    requested_sizes = [int(size) for size in requested_sizes]
+
+    cached: dict[str, Any] = {}
+    if manifest.is_file():
+        try:
+            cached = json.loads(manifest.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            cached = {}
+    have = {int(entry.get("problem_size") or 0) for entry in (cached.get("instances") or [])}
+    missing = [size for size in requested_sizes if size not in have]
+    if not force and "sizes" not in params and not missing:
+        # Every requested size is already on disk. A new size must still be added
+        # even though data exists: the loader gates fall back to whatever is
+        # present, so silently skipping would score an n=50 task on n=20 instances.
+        return []
 
     resolved_horizon = horizon if horizon is not None else params.get("horizon")
     instances = generate_instances(
-        sizes=sizes or [int(v) for v in (params.get("sizes") or [20])],
+        sizes=requested_sizes,
         count_per_size=int(count_per_size if count_per_size is not None else params.get("count_per_size") or 3),
         seed=int(seed if seed is not None else params.get("seed") or 1234),
         capacity=float(capacity if capacity is not None else params.get("capacity") or DEFAULT_CAPACITY),
@@ -324,13 +441,20 @@ def build_dataset(
             service_time if service_time is not None else params.get("service_time") or DEFAULT_SERVICE_TIME
         ),
         horizon=None if resolved_horizon is None else float(resolved_horizon),
+        spec=params,
     )
+    new_names = {instance["name"] for instance in instances}
+
+    # Keep instances of sizes this call did not ask for. Overwriting the manifest
+    # would make an n=20 dataset disappear just because an n=50 run happened.
+    kept = [entry for entry in (cached.get("instances") or []) if entry.get("name") not in new_names]
+
     for instance in instances:
         size = int(instance["problem_size"])
         folder = out_dir / f"n{size}"
         write_instance_json(instance, folder / f"{instance['name']}.json")
         write_instance_vrp(instance, folder / f"{instance['name']}.vrp")
-    write_manifest(instances, out_dir)
+    write_manifest(instances, out_dir, existing=kept)
     return instances
 
 

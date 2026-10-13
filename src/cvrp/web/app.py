@@ -26,6 +26,12 @@ def create_app(config: dict[str, Any], root: Path, results_dir: Path | None = No
         results_dir: override for ``workspace.results_dir``.
     """
     context = api.RunContext(config, Path(root))
+    # The records layer resolves `records.dir` against the project root, and the
+    # orchestrator sets this anchor on every config it runs. The dashboard reads the
+    # knowledge base directly, so it has to establish the same anchor -- otherwise
+    # `./records` would resolve against the process's working directory and the panel
+    # would show (or create) the wrong knowledge base.
+    config.setdefault("_project_root", str(Path(root)))
     if results_dir is not None:
         context.results_dir = Path(results_dir)
 
@@ -53,6 +59,8 @@ def create_app(config: dict[str, Any], root: Path, results_dir: Path | None = No
         Route("/api/runs", api.get_runs),
         Route("/api/stages", api.get_stages),
         Route("/api/artifacts", api.get_artifacts),
+        Route("/api/records", api.get_records),
+        Route("/api/record-file", api.get_record_file),
         Route("/api/file", api.get_file),
         Route("/api/logs", api.get_logs),
         Route("/api/log", api.get_log),

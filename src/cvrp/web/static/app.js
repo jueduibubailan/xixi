@@ -8,6 +8,8 @@ const state = {
   log: "pipeline.log",
   logs: [],
   timer: null,
+  tab: "artifacts",
+  records: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -128,22 +130,89 @@ async function loadStages() {
   }
 }
 
-async function loadFiles() {
+// Three sources behind one browser. `artifacts` and `run-records` live in the run
+// directory and go through /api/file; the knowledge base lives in the *project*
+// (records/main) and needs its own endpoint, because the run-scoped path guard
+// deliberately cannot reach outside a run.
+async function loadBrowser() {
+  if (state.tab === "artifacts") return renderArtifacts();
+  return renderRecords();
+}
+
+async function renderArtifacts() {
   const payload = await api(`/api/artifacts${qs({ dir: "artifacts" })}`);
-  const list = $("files");
-  list.innerHTML = "";
-  const entries = payload.entries || [];
-  if (!entries.length) {
-    list.innerHTML = '<li class="msg">no artifacts yet</li>';
+  setHead("");
+  renderList((payload.entries || []).map((entry) => ({
+    path: entry.path,
+    label: entry.path,
+    size: entry.size,
+    group: entry.path.includes("/") ? entry.path.split("/")[0] + "/" : "",
+  })), "no artifacts yet");
+}
+
+async function renderRecords() {
+  const payload = await api(`/api/records${qs()}`);
+  state.records = payload;
+  const main = payload.main || [];
+  const run = payload.run || [];
+  $("count-records").textContent = main.length ? `${main.length}` : "0";
+  $("count-run-records").textContent = run.length ? `${run.length}` : "0";
+
+  if (state.tab === "records") {
+    const areas = payload.areas || {};
+    const summary = Object.keys(areas)
+      .sort()
+      .map((area) => `${area} ${areas[area]}`)
+      .join(" · ");
+    setHead(`${esc(payload.main_dir || "records/main")}${summary ? ` — ${esc(summary)}` : ""}`);
+    renderList(main.map((item) => ({
+      path: item.path,
+      label: item.path.replace(/^main\//, ""),
+      size: item.bytes,
+      group: item.area,
+      badge: item.from_this_run ? "new" : "",
+    })), "the knowledge base is empty — the first run will create it");
     return;
   }
-  for (const entry of entries) {
-    const item = document.createElement("li");
-    item.dataset.path = entry.path;
-    if (entry.path === state.file) item.classList.add("active");
-    item.innerHTML = `${esc(entry.path)}<span class="size">${entry.size}B</span>`;
-    item.onclick = () => openFile(entry.path);
-    list.appendChild(item);
+
+  setHead(`per-run records for ${esc(state.run || "this run")}`);
+  renderList(run.map((item) => ({
+    path: item.path,
+    label: item.path,
+    size: item.bytes,
+    group: `${item.bucket}/`,
+  })), "no records for this run yet");
+}
+
+function setHead(text) {
+  const node = $("records-head");
+  node.innerHTML = text || "";
+  node.style.display = text ? "block" : "none";
+}
+
+function renderList(items, emptyText) {
+  const list = $("files");
+  list.innerHTML = "";
+  if (!items.length) {
+    list.innerHTML = `<li class="msg">${esc(emptyText)}</li>`;
+    return;
+  }
+  let currentGroup = null;
+  for (const item of items) {
+    if (item.group && item.group !== currentGroup) {
+      currentGroup = item.group;
+      const head = document.createElement("li");
+      head.className = "group";
+      head.textContent = currentGroup;
+      list.appendChild(head);
+    }
+    const node = document.createElement("li");
+    node.dataset.path = item.path;
+    if (item.path === state.file) node.classList.add("active");
+    const badge = item.badge ? `<span class="badge new">${esc(item.badge)}</span>` : "";
+    node.innerHTML = `${esc(item.label)}${badge}<span class="size">${item.size}B</span>`;
+    node.onclick = () => openFile(item.path);
+    list.appendChild(node);
   }
 }
 
@@ -151,8 +220,13 @@ async function openFile(path) {
   state.file = path;
   $("file-name").textContent = path;
   $("file-body").textContent = "loading…";
+  const isRecord = state.tab !== "artifacts";
+  const endpoint = isRecord ? "/api/record-file" : "/api/file";
+  const query = isRecord && state.tab === "run-records"
+    ? { path, origin: "run" }
+    : { path };
   try {
-    const payload = await api(`/api/file${qs({ path })}`);
+    const payload = await api(`${endpoint}${qs(query)}`);
     $("file-body").textContent = payload.text ?? "";
   } catch (error) {
     $("file-body").textContent = `cannot display: ${error.message}`;
@@ -160,6 +234,17 @@ async function openFile(path) {
   document.querySelectorAll("#files li").forEach((node) => {
     node.classList.toggle("active", node.dataset.path === path);
   });
+}
+
+function selectTab(tab) {
+  state.tab = tab;
+  state.file = "";
+  $("file-name").textContent = "select a file";
+  $("file-body").textContent = "—";
+  document.querySelectorAll("#tabs .tab").forEach((node) => {
+    node.classList.toggle("active", node.dataset.tab === tab);
+  });
+  loadBrowser().catch(() => {});
 }
 
 async function loadLogList() {
@@ -202,7 +287,7 @@ async function loadLog() {
 /* ------------------------------ lifecycle ------------------------------ */
 
 async function refreshAll() {
-  await Promise.allSettled([loadStatus(), loadGrader(), loadStages()]);
+  await Promise.allSettled([loadStatus(), loadGrader(), loadStages(), loadBrowser()]);
 }
 
 function startPolling() {
@@ -210,7 +295,7 @@ function startPolling() {
   state.timer = setInterval(async () => {
     await Promise.allSettled([loadStatus(), loadGrader(), loadStages(), loadLog()]);
   }, 2000);
-  setInterval(() => { loadFiles().catch(() => {}); loadLogList().then(loadLog).catch(() => {}); }, 8000);
+  setInterval(() => { loadBrowser().catch(() => {}); loadLogList().then(loadLog).catch(() => {}); }, 8000);
 }
 
 function startSSE() {
@@ -226,9 +311,13 @@ function wireControls() {
   $("run-select").onchange = async (event) => {
     state.run = event.target.value;
     state.file = "";
-    await Promise.allSettled([refreshAll(), loadFiles(), loadLogList().then(loadLog)]);
+    state.tab = state.tab || "artifacts";
+    await Promise.allSettled([refreshAll(), loadBrowser(), loadLogList().then(loadLog)]);
   };
   $("log-select").onchange = (event) => { state.log = event.target.value; loadLog(); };
+  document.querySelectorAll("#tabs .tab").forEach((node) => {
+    node.onclick = () => selectTab(node.dataset.tab);
+  });
   $("log-refresh").onclick = () => loadLog();
   $("copy-btn").onclick = async () => {
     try { await navigator.clipboard.writeText($("file-body").textContent); $("copy-btn").textContent = "copied"; }
@@ -258,7 +347,7 @@ async function boot() {
   await loadHealth();
   await loadRuns();
   wireControls();
-  await Promise.allSettled([refreshAll(), loadFiles(), loadLogList().then(loadLog)]);
+  await Promise.allSettled([refreshAll(), loadBrowser(), loadLogList().then(loadLog)]);
   startPolling();
   startSSE();
 }

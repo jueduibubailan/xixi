@@ -1,0 +1,195 @@
+# Task entry point -- n = 50 customers.
+#
+#   uv run cvrp start task_n50.yaml
+#   uv run cvrp start task_n50.yaml llm.backend=mock     # offline self-check
+#
+# Identical to `task.yaml` except for `scale`. That one number drives:
+#
+#   * which instances are generated        -> instances/data/cvrptw/n50/
+#   * the generated entry-point file names -> train_n50.py / test_n50.py
+#   * the dimensions the agents are told   -> problem_size 50, pomo_size 50
+#   * which instance the executor runs on  -> grader.args.instance_size
+#
+# The checkpoint is size-agnostic (its encoder embedding is 2 -> 128 and its
+# attention is over nodes), so it loads unchanged at n=50. It was trained on
+# CVRP100, so expect a modest quality drop versus n=100; that is a property of the
+# weights, not of the pipeline.
+
+task:
+  name: "CVRPTW-n50-on-POMO"
+  slug: "cvrptw-n50"
+  description: |
+    Synthesize a POMO-based solver for the **Capacitated Vehicle Routing Problem
+    with Time Windows (CVRPTW)** at **n = 50 customers**, by *modifying the input,
+    state and masking* of the existing POMO CVRP implementation -- not by
+    rewriting its neural backbone.
+
+    The seed code (the `pomo/` baseline staged into your worktree) solves plain
+    CVRP: it samples coordinates and demands, then rolls out POMO's RNN
+    encoder-decoder with a `visited` mask and a capacity mask. CVRPTW adds a
+    constraint on *when* each customer may be served, which forces:
+
+      1. two new per-instance tensors: `time_windows` (n+1, 2) and
+         `service_times` (n+1,);
+      2. one new per-step dynamic state: `current_time` (batch, pomo);
+      3. a new masking layer: a customer is masked when it is already visited,
+         when serving it would exceed capacity, or when it cannot be served
+         inside its time window given the arrival time;
+      4. a replacement of the capacity-only masking rule with a rule that also
+         carries a "return-to-depot is always allowed for feasibility" exception.
+
+    This task is scoped to **n = 50**: an instance file carries 51 nodes
+    (1 depot + 50 customers), so its `DIMENSION` header reads 51. The training
+    entry point is `train_n50.py` and the test entry point is `test_n50.py`; do
+    not carry over the baseline's `n100` names or its 100-customer defaults.
+
+    The checkpoint becomes available in your worktree as the path named by
+    `problem.yaml:resources.checkpoint`. It was trained by POMO on CVRP100, and
+    the synthesized solver must keep it loadable: the encoder's input dimension
+    stays unchanged, and any new information enters the decoder as an additional
+    concatenated feature.
+
+  tips: |
+    - Time is defined by Euclidean distance (travel time == distance). Do NOT
+      introduce a vehicle speed.
+    - Customers may be served at or after their window opens; arriving early is
+      allowed and the vehicle waits. Arriving after the window closes is infeasible.
+    - A vehicle may always return to the depot; returning early simply starts a
+      new route, and it costs the depot round trip.
+    - Service times accumulate onto the current time. Waiting accumulates too.
+    - The acceptance contract of the whole pipeline is textual: the generated
+      program must print both lines listed under `program.expected_lines` in
+      `problems/cvrptw/problem.yaml`, on stdout.
+    - Instances are synthesized locally at n=50 (3 of them, deterministic seeds).
+      Nobody supplies a dataset.
+    - The generated program must read the instance it is handed; n=50 is the
+      dimension to build tensors for, not a licence to hardcode coordinates.
+    - Budget note: n=50 costs roughly 2.5x the per-iteration time of n=20 on CPU.
+      Keep the hot loop vectorized, and prefer fewer, better iterations over more.
+
+# Which problem directory describes this variant. `dir` is optional: by default
+# the engine looks in <project>/problems/<slug>/ and then inside the package.
+problem:
+  slug: "cvrptw"
+  # dir: "./problems/cvrptw"
+
+# The instance size. This is the one place n is written; everything else in this
+# file, the spec's `{n}` placeholders and the executor's instance selection follow
+# from it.
+scale:
+  problem_size: 50          # customers (the instance DIMENSION is this + 1)
+  pomo_size: 50             # parallel rollouts; omit to default to problem_size
+  aug_factor: 8             # POMO's 8-fold symmetry augmentation
+
+llm:
+  backend: "claude_code"      # claude_code | coral | mock
+  runtime: "claude_code"      # CORAL-style runtime name (kept for shell parity)
+  model: "deepseek-flash"     # model id passed to `claude --model`
+  claude_bin: "claude"        # resolved via PATH; set an absolute path if needed
+  max_turns: 0                # 0 = let the session run until it exits naturally
+  permission_mode: "auto"     # passed as --permission-mode
+  extra_args: []              # extra CLI flags appended verbatim
+  # Credentials and routing are inherited from your shell by default, because a
+  # model name that is not native to Anthropic (deepseek-flash included) only works
+  # when ANTHROPIC_BASE_URL points at a router. Set inherit_routing_env: false to
+  # strip them for isolation, or name values below to override them.
+  inherit_routing_env: true
+  env: {}
+  timeout_seconds: 3600       # per-stage wall clock before we kill the agent
+
+stages:
+  - name: retrieval
+    kind: agent
+    role: "src/cvrp/roles/retrieval_agent.md"
+    prompt: retrieval
+    produces: ["artifacts/records/retrieval.json"]
+    timeout_seconds: 1800
+
+  - name: analysis
+    kind: agent
+    role: "src/cvrp/roles/analysis_agent.md"
+    prompt: analysis
+    produces: ["artifacts/analysis/analysis.json"]
+    timeout_seconds: 1800
+
+  - name: code_generation
+    kind: agent
+    role: "src/cvrp/roles/code_generation_agent.md"
+    prompt: codegen
+    produces: ["artifacts/generated/"]
+    timeout_seconds: 3600
+
+  - name: code_error
+    kind: executor            # no LLM
+    role: "src/cvrp/roles/code_error_agent.md"
+    produces: ["artifacts/runs/s3_run_report.json"]
+    steps: [py_compile, import_probe, smoke_run, full_run]
+
+  - name: code_revise
+    kind: agent
+    role: "src/cvrp/roles/code_revise_agent.md"
+    produces: ["artifacts/revisions/", "artifacts/reviews/"]
+    timeout_seconds: 3600
+
+  - name: feasibility
+    kind: executor            # no LLM
+    role: "src/cvrp/roles/feasibility_agent.md"
+    produces: ["artifacts/runs/s5_feasibility.json"]
+
+  # Last: the knowledge base is only written once the verdict is known, so a failed run
+  # cannot record its lessons as if they had worked.
+  - name: update
+    kind: agent
+    role: "src/cvrp/roles/update_agent.md"
+    prompt: update
+    produces: ["records/main"]
+    timeout_seconds: 1800
+loop:
+  # code_error -> code_revise -> code_error, until the acceptance contract passes.
+  on: ["code_error", "code_revise"]
+  until: "contract_passed"
+  max_rounds: 5
+
+grader:
+  entrypoint: "cvrp.executor.grader:CodeGrader"
+  direction: "maximize"
+  timeout: 1800               # n=50 needs a longer budget than n=20
+  args:
+    require_feasible: true
+    # Which instance to run on: `instance_size` selects the n50/ folder, so a run
+    # never accidentally scores on a different size. Keep it equal to
+    # `scale.problem_size` above.
+    instance_size: 50
+    # Iteration budget for the generated program's full run, and for the grader.
+    iterations: 100
+    require_solution_dump: true
+
+records:
+  # Where the cross-run knowledge base lives. `dir` may be absolute if several projects
+  # should share one -- the point of the feature is that a new project can read what an
+  # earlier one learned.
+  dir: "./records"
+  main: main          # skills/notes/attempts: the durable part
+  related: related    # what retrieval selected, per run
+  temp: temp          # one record per agent, per run
+  max_candidates: 8   # retrieval's ranked shortlist size
+  keep_attempts: 20   # attempts blocks kept per problem
+  include_in_export: false
+
+
+workspace:
+  results_dir: "./results"
+  final_dir: "./workspace/final"
+  # The executor runs the generated program with *this* project's interpreter
+  # (sys.executable), not with whatever `python` is first on PATH. The generated
+  # POMO solver needs torch, so it is installed here rather than assumed.
+  # `uv pip install` is a fast no-op once satisfied, and this whole block runs only
+  # when its text changes (fingerprinted under .cvrp/setup.json), or with
+  # `cvrp start ... run.setup=force`.
+  setup:
+    - "uv pip install torch --index-url https://download.pytorch.org/whl/cpu"
+
+run:
+  verbose: true
+  ui: false
+  session: "local"                 # local | tmux (parity with CORAL)

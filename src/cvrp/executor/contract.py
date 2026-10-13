@@ -309,6 +309,152 @@ def py_compile(run_dir: Path, worktree: Path, generated_rel: str = "artifacts/ge
     )
 
 
+def _package_root(target: Path) -> Path:
+    """The directory that should be on ``sys.path`` to import the deliverable.
+
+    The deliverable mirrors the baseline tree, so a nested module like
+    ``pomo/POMO/CVRPEnv.py`` is imported as ``pomo.POMO.CVRPEnv`` and needs the
+    generated directory itself on the path -- not the nested folder.
+    """
+    return target
+
+
+def instance_problem_size(path: Path) -> int | None:
+    """Read an instance's customer count, or ``None`` if it cannot be determined."""
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    try:
+        if payload.get("problem_size") is not None:
+            return int(payload["problem_size"])
+        # Fall back to the shape of the data when the field is absent.
+        nodes = payload.get("node_xy") or payload.get("node_coords")
+        if isinstance(nodes, list) and nodes:
+            return len(nodes)
+    except (TypeError, ValueError):
+        return None
+    return None
+
+
+def require_instance_size(
+    paths: list[Path],
+    expected_size: int | None,
+    name: str = "smoke_run",
+) -> StepResult | None:
+    """Fail when the instance about to be run is not the size the task asked for.
+
+    Without this, a task that asks for n=50 but finds only n=20 data on disk would
+    quietly score an n=20 instance: the contract still passes, the grader still
+    reports "feasible", and the number means the wrong thing. Size is part of the
+    task's identity, so a mismatch has to be a failure.
+    """
+    if expected_size is None or not paths:
+        return None
+    sizes = {instance_problem_size(path) for path in paths}
+    known = {size for size in sizes if size is not None}
+    if not known or known == {int(expected_size)}:
+        return None
+    listed = ", ".join(f"{path.name}=n{size}" for path, size in zip(paths, sizes) if size is not None)
+    return StepResult(
+        name=name,
+        passed=False,
+        error_class="wrong_instance_size",
+        message=(
+            f"this run is scoped to n={expected_size}, but the instance(s) found are "
+            f"{listed or 'of unknown size'}. Generate the right data first "
+            f"(`uv run cvrp instances`) or fix `scale.problem_size` / "
+            f"`grader.args.instance_size` so they agree."
+        ),
+    )
+
+
+def import_probe(
+    run_dir: Path,
+    worktree: Path,
+    generated_rel: str = "artifacts/generated",
+    timeout_s: int = 120,
+) -> StepResult:
+    """Import every generated module, one subprocess each.
+
+    This exists because a missing helper file, or an undeclared third-party import,
+    is otherwise indistinguishable from "the generated code crashed": ``py_compile``
+    passes (the syntax is fine) and the problem only shows up inside the smoke run.
+    Importing the modules directly names the exact module and the exact missing
+    name, which is the difference between one revise round and three.
+
+    The deliverable mirrors the baseline tree (``pomo/POMO/CVRPEnv.py``), so the walk
+    is recursive and the import statement is computed from the path relative to the
+    first package root: a package directory is any folder laid out beside ``pomo/``,
+    which is what the generation prompt writes back.
+
+    Best-effort by design: a module that legitimately does heavy work at import time
+    is not this gate's business, so only ``ModuleNotFoundError`` / ``ImportError``
+    fail it. Anything else is reported as a warning in the message.
+    """
+    target = locate_artifact(stage_search_paths(run_dir, worktree), generated_rel)
+    if target is None or not target.is_dir():
+        return StepResult(
+            name="import_probe",
+            passed=False,
+            error_class="missing_artifacts",
+            message=f"{generated_rel} does not exist -- nothing to import",
+        )
+
+    root = _package_root(target)
+    failures: list[str] = []
+    warnings: list[str] = []
+    modules: list[tuple[str, Path]] = []
+    for path in sorted(target.rglob("*.py")):
+        if path.stem == "__init__":
+            continue
+        relative = path.relative_to(root)
+        if any(part.startswith(".") for part in relative.parts):
+            continue
+        module = ".".join(relative.with_suffix("").parts)
+        modules.append((module, path))
+    for module, path in modules:
+        try:
+            proc = subprocess.run(
+                [python_executable(), "-c", f"import {module}"],
+                capture_output=True,
+                text=True,
+                # cwd is the *package root*, so `import pomo.POMO.CVRPEnv` resolves
+                # against the same layout the deliverable has.
+                cwd=str(root),
+                timeout=timeout_s,
+            )
+        except subprocess.TimeoutExpired:
+            warnings.append(f"{module}: import exceeded {timeout_s}s")
+            continue
+        if proc.returncode == 0:
+            continue
+        stderr = (proc.stderr or "").strip()
+        if "Error:" in stderr and ("ModuleNotFoundError" in stderr or "ImportError" in stderr):
+            first = next((line.strip() for line in stderr.splitlines() if "Error:" in line), "import failed")
+            failures.append(f"{module}: {first}")
+        else:
+            last = stderr.splitlines()[-1] if stderr else "non-import error"
+            warnings.append(f"{module}: import raised {last} (not a dependency problem)")
+
+    if failures:
+        return StepResult(
+            name="import_probe",
+            passed=False,
+            error_class="missing_helper",
+            message=(
+                "the generated package cannot import itself:\n  - "
+                + "\n  - ".join(failures)
+                + "\nCopy the missing baseline helper into the generated directory, or bootstrap "
+                "sys.path so it resolves, and make sure every third-party import is one the "
+                "baseline already uses."
+            ),
+        )
+    return StepResult(name="import_probe", passed=True, message="; ".join(warnings))
+
+
 def run_program(
     run_dir: Path,
     worktree: Path,

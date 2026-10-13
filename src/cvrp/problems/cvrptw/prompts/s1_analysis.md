@@ -5,11 +5,21 @@ analysis, so your output is a machine-readable contract, not prose.
 
 Problem under analysis: **{problem_name}** (`{variant_label}`).
 
+## This task's scale
+
+The task fixes the instance size. Everything you plan must be expressed for it,
+and the generated training/testing entry points must be named and sized
+accordingly:
+
+{scale_lines}
+
 ## What you are given
 
 - The task description (below) -- this is *what* must be solved.
 - The instances under `data/instances/` -- the exact data the synthesized solver
   will be run on. Read at least one of them (in both formats if two are shipped).
+  Confirm its `DIMENSION` equals {dimension} (depot + {n} customers) before you
+  write the plan.
 - `{baseline_notes}` -- the authoritative description of the baseline, of any
   domain semantics the pipeline itself verifies, and of the acceptance contract.
 - The baseline sources staged in this worktree (see "Available inputs" below).
@@ -73,9 +83,15 @@ Write **`artifacts/analysis/analysis.json`** with this shape (all keys required)
     "risk": "what breaks if a new feature is pushed into the encoder"
   },
   "run_plan": ["ordered, concrete steps for the code generation stage"],
+  "problem_size": {n},
+  "pomo_size": {pomo},
   "open_questions": ["anything genuinely undecidable from the inputs"]
 }
 ```
+
+`problem_size` is the number of **customers** ({n} here), not the instance
+`DIMENSION` ({dimension}); the generated package is built for it. Anything you
+plan that assumes a different size is a gate failure.
 
 ## Rules that decide whether this stage is accepted
 
@@ -88,17 +104,27 @@ Write **`artifacts/analysis/analysis.json`** with this shape (all keys required)
 3. **Feasibility must be checkable by a third party.** Each
    `feasibility_checklist` entry must be verifiable from the instance data alone,
    with no reference to the solver's internals.
-4. **The plan must name real symbols.** Every `pomo_modification_plan` entry must
-   point at a file that exists in the staged baseline and at a
-   function/class/method in it. Read the file before naming it.
+4. **The plan must name real symbols, in the existing files.** Every
+   `pomo_modification_plan` entry must point at one of the five baseline files the
+   variant may touch (`pomo/CVRProblemDef.py`, `pomo/POMO/CVRPEnv.py`,
+   `pomo/POMO/CVRPModel.py`, `pomo/POMO/CVRPTrainer.py`, `pomo/POMO/CVRPTester.py`)
+   and at a function/class/method that exists in it. Read the file before naming it.
+   The file set and the file names are fixed: never plan to rename a baseline file,
+   to add a new module, or to reimplement a component the baseline already has.
 5. **Never change the pretrained module's input.** `{checkpoint}` is a fixed
    artifact. Its input dimension stays as-is; new information enters the decoder
    context. If your plan contradicts this, the plan is wrong.
 6. **No instance-specific numbers.** No node counts, no coordinates, no capacity
-   values. Those live in the instance files.
+   values in the *rules* you write -- those live in the instance files. The one
+   number that is allowed, and required, is this task's scale: `problem_size` = {n}
+   with `pomo_size` = {pomo}, because the generated entry points are built for it.
 7. **Respect the declared semantics.** Any domain rule stated in
    `{baseline_notes}` or the task description (how time is defined, how a route
    starts, what counts as a violation) is binding -- do not invent a variant of it.
+8. **Stay inside POMO.** The variant is an adaptation of the staged baseline, not a
+   new solver. Do not plan a different encoder/decoder family, a new training
+   regime, or a new module layout; the environment and the checkpoint are already in
+   place and the deliverable must keep the baseline's shape.
 
 Write `artifacts/analysis/plan.md` as well: the same plan in a short narrative
 form (what you will change, in what order, and what could go wrong).

@@ -61,6 +61,35 @@ class ProblemPlugin:
     spec: dict[str, Any]
     checks_module: Any = None
     _hooks: dict[str, Callable[..., Any]] = field(default_factory=dict)
+    scale: "ScaleParams" = field(default_factory=lambda: ScaleParams())
+    required_sizes: list[int] = field(default_factory=list)
+    tag: str = ""
+
+    # -- scale ------------------------------------------------------------- #
+
+    @property
+    def problem_tag(self) -> str:
+        """The identifier used in generated file names (`CVRPTW`)."""
+        return self.tag or problem_tag(self.name)
+
+    @property
+    def problem_size(self) -> int:
+        """Number of *customers* the solver is built for (the "n" of the task).
+
+        Instances carry ``problem_size + 1`` nodes because index 0 is the depot,
+        which matches the ``DIMENSION`` header of a Solomon/VRPLIB file. So an
+        n=50 task consumes a ``DIMENSION : 51`` instance, and n=100 consumes
+        ``DIMENSION : 101``.
+        """
+        return int(self.scale.problem_size)
+
+    def specs(self) -> dict[str, Any]:
+        """The spec with ``{n}``/``{pomo}``/``{aug}``/``{problem}`` substituted."""
+        return render_spec(self.spec, self.scale, self.problem_tag)
+
+    def render(self, value: Any) -> Any:
+        """Substitute the scale and problem placeholders in any value."""
+        return render_spec(value, self.scale, self.problem_tag)
 
     # -- identity ---------------------------------------------------------- #
 
@@ -89,7 +118,9 @@ class ProblemPlugin:
 
         ``problem.yaml:agent_context`` may be a path to a file (the usual case,
         and the only readable option once a task is distributed) or a literal
-        block of text. Both are resolved against the problem directory.
+        block of text. Both are resolved against the problem directory, and both
+        get the scale placeholders substituted, so the context can name the task's
+        problem size without the file hardcoding it.
         """
         raw = str(self.spec.get("agent_context") or "").strip()
         if raw:
@@ -97,10 +128,12 @@ class ProblemPlugin:
             if not candidate.is_absolute():
                 candidate = self.root / raw
             if candidate.is_file():
-                return candidate.read_text(encoding="utf-8").strip()
-            return raw
+                return self.render(candidate.read_text(encoding="utf-8")).strip()
+            return str(self.render(raw)).strip()
         fallback = self.root / "problem_context.md"
-        return fallback.read_text(encoding="utf-8").strip() if fallback.is_file() else ""
+        if fallback.is_file():
+            return str(self.render(fallback.read_text(encoding="utf-8"))).strip()
+        return ""
 
     # -- program / CLI contract -------------------------------------------- #
 
@@ -208,6 +241,27 @@ class ProblemPlugin:
         """Glob (relative to the data dir) that finds one instance to run on."""
         return str(self.data.get("instance_glob") or "**/*.json")
 
+    @property
+    def correspondence(self) -> dict[str, str | None]:
+        """Deliverable file -> the POMO source it is adapted from (``None`` = none).
+
+        This is what makes "the generated code is one-to-one with POMO" checkable:
+        the executor's correspondence gate walks this table, looks for the
+        ``# baseline-correspondence:`` first line the generation prompt requires, and
+        rejects extra ``.py`` files the table does not mention.
+        """
+        raw = (self.spec.get("generated") or {}).get("correspondence") or {}
+        if not isinstance(raw, dict):
+            return {}
+        out: dict[str, str | None] = {}
+        for name, source in raw.items():
+            # Render defensively: the spec handed to a plugin is already rendered,
+            # but a test may load one that is not.
+            key = str(self.render(name))
+            text = str(source) if source not in (None, "") else ""
+            out[key] = str(self.render(text)).strip() or None
+        return out
+
     def artifact_inputs(self, stage_name: str = "") -> list[str]:
         """Run-relative files copied into a stage worktree as read-only inputs.
 
@@ -226,12 +280,49 @@ class ProblemPlugin:
         return [str(item) for item in chosen]
 
     def data_ready(self, data_dir: Path) -> bool:
+        """Is the data this *task* needs already on disk?
+
+        The marker alone is not enough: one problem serves several tasks (n=20,
+        n=50, n=100) out of a shared data directory, so "manifest.json exists"
+        says nothing about *which* sizes exist. Without the size check a task
+        asking for n=50 would find the n=20 manifest, skip generation, and then
+        run on the wrong instances -- or fail confusingly further down.
+        """
         marker = self.data.get("ready_marker")
         if not marker:
             marker = "manifest.json"
         if marker == "none":
             return True
-        return (Path(data_dir) / str(marker)).exists()
+        path = Path(data_dir) / str(marker)
+        if not path.exists():
+            return False
+        needed = set(self.required_sizes)
+        if not needed:
+            return True
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False
+        if not isinstance(payload, dict):
+            return True  # an opaque marker: not our business to interpret
+        entries = payload.get("instances")
+        if not isinstance(entries, list):
+            return True
+        present: set[int] = set()
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                size = int(entry.get("problem_size") or 0)
+            except (TypeError, ValueError):
+                continue
+            relative = entry.get("json")
+            # A manifest entry is a promise, not proof: the file has to be there.
+            # A hand-deleted or partially-copied data directory would otherwise
+            # count as ready and fail later, inside the executor.
+            if relative and (Path(data_dir) / str(relative)).is_file():
+                present.add(size)
+        return needed.issubset(present)
 
     def build_dataset(self, out_dir: Path, force: bool = False) -> list[Any]:
         """Synthesize the problem's data using the configured generator."""
@@ -332,8 +423,198 @@ def _load_file(path: Path) -> Any:
 HOOK_NAMES = ("build_dataset", "verify", "extract_best_cost", "score", "revision_hints")
 
 
-def load_problem(problem_dir: str | Path, slug: str | None = None) -> ProblemPlugin:
-    """Load a problem directory into a :class:`ProblemPlugin`."""
+# --------------------------------------------------------------------------- #
+# scale: the instance size a task asks for
+# --------------------------------------------------------------------------- #
+
+#: The value substituted when a task does not declare a scale at all. It matches
+#: the long-standing n=20 default, so a config written before scale existed keeps
+#: producing exactly the same spec -- and therefore the same file names, data
+#: directory and dimensions.
+DEFAULT_PROBLEM_SIZE = 20
+DEFAULT_AUG_FACTOR = 8
+
+
+@dataclass(frozen=True)
+class ScaleParams:
+    """How large the problem is, for one task.
+
+    The point of this being a first-class value is that ``n`` is written **once**,
+    in the task file, and everything derived from it -- generated file names
+    (``train_n{n}.py``), the instance directory (``n{n}/``), the dimensions handed
+    to the code-generation agent, and the data generator's ``sizes`` -- follows.
+    """
+
+    problem_size: int = DEFAULT_PROBLEM_SIZE
+    pomo_size: int | None = None
+    aug_factor: int = DEFAULT_AUG_FACTOR
+
+    @property
+    def effective_pomo_size(self) -> int:
+        """POMO's start-node count. Defaults to the problem size (the POMO paper's
+        setting); a task may override it for a different rollout policy."""
+        return int(self.pomo_size or self.problem_size)
+
+    def placeholders(self) -> dict[str, str]:
+        return {
+            "n": str(self.problem_size),
+            "problem_size": str(self.problem_size),
+            "pomo": str(self.effective_pomo_size),
+            "pomo_size": str(self.effective_pomo_size),
+            "aug": str(self.aug_factor),
+            "aug_factor": str(self.aug_factor),
+            "dimension": str(self.problem_size + 1),
+        }
+
+
+def scale_from_config(config: dict[str, Any] | None) -> ScaleParams:
+    """Read ``task.yaml:scale`` (with fallbacks) into :class:`ScaleParams`.
+
+    Accepted spellings, in order of precedence:
+
+    * ``scale: {problem_size: 50, pomo_size: 50, aug_factor: 8}`` -- the documented
+      form;
+    * ``problem: {size: 50}`` and ``data: {sizes: [50]}`` -- tolerated so an existing
+      config that already names a size keeps working;
+    * nothing at all -- ``n`` stays at :data:`DEFAULT_PROBLEM_SIZE`.
+    """
+    config = config or {}
+    raw = config.get("scale") or {}
+    if not isinstance(raw, dict):
+        raise ProblemError(f"task.scale must be a mapping, got {type(raw).__name__}")
+
+    def _pick_int(*candidates: Any) -> int | None:
+        for value in candidates:
+            if value is None or value == "" or isinstance(value, bool):
+                continue
+            try:
+                return int(value)
+            except (TypeError, ValueError) as exc:
+                raise ProblemError(f"scale values must be integers, got {value!r}") from exc
+        return None
+
+    data = config.get("data") if isinstance(config.get("data"), dict) else {}
+    sizes = data.get("sizes") if isinstance(data, dict) else None
+    first_size = sizes[0] if isinstance(sizes, (list, tuple)) and sizes else None
+    problem_block = config.get("problem") if isinstance(config.get("problem"), dict) else {}
+
+    size = _pick_int(raw.get("problem_size"), raw.get("n"), problem_block.get("size"), first_size)
+    problem_size = size if size is not None else DEFAULT_PROBLEM_SIZE
+    if problem_size < 1:
+        raise ProblemError(f"scale.problem_size must be >= 1, got {problem_size}")
+
+    pomo_size = _pick_int(raw.get("pomo_size"), raw.get("pomo"))
+    if pomo_size is not None and pomo_size < 1:
+        raise ProblemError(f"scale.pomo_size must be >= 1, got {pomo_size}")
+    if pomo_size is not None and pomo_size > problem_size:
+        raise ProblemError(
+            f"scale.pomo_size ({pomo_size}) cannot exceed scale.problem_size ({problem_size}): "
+            "POMO starts one rollout per node, so it cannot start more than there are nodes"
+        )
+
+    aug = _pick_int(raw.get("aug_factor"), raw.get("aug"))
+    aug_factor = aug if aug is not None else DEFAULT_AUG_FACTOR
+    if aug_factor < 1:
+        raise ProblemError(f"scale.aug_factor must be >= 1, got {aug_factor}")
+
+    return ScaleParams(problem_size=problem_size, pomo_size=pomo_size, aug_factor=aug_factor)
+
+
+#: Placeholders the spec may use. Anything else is left untouched, so unrelated
+#: braces in a spec value cannot be mangled -- and no existing spec contains any.
+SCALE_KEYS = ("problem_size", "pomo_size", "aug_factor", "dimension", "n", "pomo", "aug")
+
+#: Placeholders derived from the problem itself rather than from the task's scale.
+PROBLEM_KEYS = ("problem", "slug")
+
+#: How many substitution passes to allow. Two keys can reference each other
+#: (``dimension`` is derived), so one pass is not always enough; the cap stops a
+#: pathological self-reference from looping forever.
+_RENDER_PASSES = 5
+
+
+def problem_tag(name: str) -> str:
+    """The identifier a problem uses in generated file names (``CVRPTW``).
+
+    Derived from a display name: uppercase, letters and digits only.
+    ``"CVRPTW-on-POMO"`` -> ``"CVRPTWONPOMO"`` -- so a spec that wants a short tag
+    (``CVRPTW``) should declare ``tag:`` explicitly. That is what
+    :func:`_derive_tag` prefers.
+    """
+    tag = "".join(ch for ch in str(name).upper() if ch.isalnum())
+    return tag or "CVRP"
+
+
+def _derive_tag(spec: dict[str, Any], scale: ScaleParams, fallback: str) -> str:
+    """Pick the generated-file tag: explicit ``tag``, else ``variant_label``, else slug.
+
+    ``tag`` is the documented way; the other two are conveniences so a new problem
+    does not have to declare it to get a usable name.
+    """
+    for key in ("tag", "variant_label", "slug"):
+        raw = spec.get(key)
+        if not raw:
+            continue
+        text = str(render_spec(str(raw), scale))
+        # `variant_label` is often "CVRPTW-on-POMO": keep the part before the first
+        # separator, because that is the variant name and the rest is a strategy note.
+        head = text.replace("_", "-").split("-")[0]
+        tag = problem_tag(head)
+        if tag and tag != "CVRP":
+            return tag
+    return problem_tag(fallback)
+
+
+def render_spec(value: Any, scale: ScaleParams | None = None, tag: str = "") -> Any:
+    """Substitute scale and problem placeholders throughout a spec.
+
+    Only the keys in :data:`SCALE_KEYS` (plus :data:`PROBLEM_KEYS` when a ``tag`` is
+    given) are replaced. A spec value may reference the placeholders at any depth,
+    and non-string scalars are copied through unchanged, so this is safe to run over
+    an entire ``problem.yaml``.
+    """
+    placeholders = (scale or ScaleParams()).placeholders()
+    if tag:
+        placeholders = {**placeholders, "problem": tag, "slug": tag.lower()}
+        keys = SCALE_KEYS + PROBLEM_KEYS
+    else:
+        keys = SCALE_KEYS
+
+    if isinstance(value, dict):
+        return {key: render_spec(item, scale, tag) for key, item in value.items()}
+    if isinstance(value, list):
+        return [render_spec(item, scale, tag) for item in value]
+    if isinstance(value, tuple):
+        return tuple(render_spec(item, scale, tag) for item in value)
+    if not isinstance(value, str):
+        return value
+
+    text = value
+    for _ in range(_RENDER_PASSES):
+        replaced = text
+        for key in keys:
+            replaced = replaced.replace("{" + key + "}", placeholders[key])
+        if replaced == text:
+            break
+        text = replaced
+    return text
+
+
+def load_problem(
+    problem_dir: str | Path,
+    slug: str | None = None,
+    scale: ScaleParams | None = None,
+    required_sizes: list[int] | None = None,
+) -> ProblemPlugin:
+    """Load a problem directory into a :class:`ProblemPlugin`.
+
+    ``scale`` substitutes the spec's ``{n}``/``{pomo}``/``{aug}`` placeholders and
+    is carried on the plugin so prompt rendering, the data generator and the
+    executor all agree on the instance size.
+
+    ``required_sizes`` says which instance sizes must be present for the data
+    directory to count as ready. It defaults to the task's own problem size.
+    """
     root = Path(problem_dir)
     if not root.is_dir():
         raise ProblemError(f"problem directory not found: {root}")
@@ -344,6 +625,14 @@ def load_problem(problem_dir: str | Path, slug: str | None = None) -> ProblemPlu
         spec = yaml.safe_load(handle) or {}
     if not isinstance(spec, dict):
         raise ProblemError(f"problem.yaml root must be a mapping: {spec_file}")
+
+    # Render before anything reads the spec: the checks module is handed the same
+    # rendered mapping, so a hook that reads ``spec["data"]["sizes"]`` sees the
+    # task's size rather than the template's. The problem tag comes from the spec's
+    # own ``tag``/``variant_label``, hence the two-step render.
+    effective_scale = scale or ScaleParams()
+    tag = _derive_tag(spec, effective_scale, root.name)
+    spec = render_spec(spec, effective_scale, tag)
 
     checks_module = None
     checks_file = root / str(spec.get("checks") or "checks.py")
@@ -361,7 +650,17 @@ def load_problem(problem_dir: str | Path, slug: str | None = None) -> ProblemPlu
                 hooks[hook_name] = candidate
 
     resolved_slug = str(slug or spec.get("slug") or root.name)
-    return ProblemPlugin(slug=resolved_slug, root=root, spec=spec, checks_module=checks_module, _hooks=hooks)
+    sizes = [int(size) for size in (required_sizes or [effective_scale.problem_size])]
+    return ProblemPlugin(
+        slug=resolved_slug,
+        root=root,
+        spec=spec,
+        checks_module=checks_module,
+        _hooks=hooks,
+        scale=effective_scale,
+        required_sizes=sizes,
+        tag=tag,
+    )
 
 
 def find_problem_dir(slug: str, config: dict[str, Any] | None = None) -> Path:

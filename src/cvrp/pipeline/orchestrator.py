@@ -20,9 +20,11 @@ Design notes
 from __future__ import annotations
 
 import shutil
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from cvrp import records
 from cvrp.compat.coral_adapter import coral_info
 from cvrp.config import (
     get_stage,
@@ -40,6 +42,7 @@ from cvrp.pipeline import gates
 from cvrp.pipeline.stages import StageOutcome, run_agent_stage
 from cvrp.problems import ProblemPlugin
 from cvrp.run.run_dir import append_log, make_run_dir, read_json, write_json
+from cvrp.run.setup import run_setup
 from cvrp.run.state import DONE, FAILED, RunState
 from cvrp.run.worktree import collect_artifacts, read_baseline, seed_worktree
 
@@ -73,7 +76,23 @@ class Orchestrator:
         self.data_dir = resolve_path(config, self.problem.data_dir_name)
         self.contract = Contract.from_config(config)
         self.dry_run = dry_run
-        self.backend = make_backend(dict(config.get("llm") or {}), problem=self.problem)
+        # The records layer needs the run id, the project root and the retrieval output
+        # location at instruction-render time, and the backend needs the first two as well.
+        # Putting them on the config keeps every stage and the offline backend agreeing
+        # without threading three values through each call.
+        self.run_id = self.run_dir.name
+        self.config["_run_id"] = self.run_id
+        self.config.setdefault("_project_root", str(self.root))
+        self.related_dir = records.related_dir(config, self.run_id)
+        self.config["_records_related_dir"] = str(self.related_dir)
+        llm_config = dict(config.get("llm") or {})
+        llm_config.update(
+            {
+                "_run_id": self.run_id,
+                "_project_root": str(self.root),
+            }
+        )
+        self.backend = make_backend(llm_config, problem=self.problem)
         write_json(self.run_dir / "config.resolved.json", _serializable_config(config), default=str)
 
     # -- logging ----------------------------------------------------------- #
@@ -84,6 +103,21 @@ class Orchestrator:
             print(f"[cvrp] {message}")
 
     # -- preparation -------------------------------------------------------- #
+
+    def ensure_setup(self) -> None:
+        """Materialize whatever the task says the environment needs.
+
+        Runs before any stage, because a missing runtime dependency (torch for the
+        generated solver) would otherwise surface as an `import_error` inside the
+        code error stage and read like the agent's mistake.
+        """
+        if (self.config.get("run") or {}).get("setup", True) in (False, "false", "skip"):
+            self.log("setup: skipped by run.setup=false")
+            return
+        result = run_setup(self.config, force=bool(self.config.get("_setup_force")), log=self.log)
+        for line in result.lines():
+            if line.startswith("setup:"):
+                self.log(line)
 
     def ensure_instances(self) -> None:
         """Ask the problem to materialize its data if it is not there yet."""
@@ -98,6 +132,201 @@ class Orchestrator:
         written = self.problem.build_dataset(self.data_dir)
         if written:
             self.log(f"data: {len(written)} item(s) written")
+
+    # -- records ------------------------------------------------------------ #
+
+    def ensure_records(self) -> None:
+        """Snapshot the problem description into the run's records.
+
+        This is the one record the engine writes: it is the *input* to everything else, so
+        a model has nothing to add and every run should have an identical, timestamped
+        copy of what it was asked to solve.
+        """
+        task = self.config.get("task") or {}
+        records.write_run_record(
+            self.config,
+            self.run_id,
+            "problem_description",
+            {
+                "task": {"name": task.get("name"), "slug": task.get("slug")},
+                "problem": {"slug": self.problem.slug, "tag": self.problem.problem_tag},
+                "scale": {
+                    "problem_size": self.problem.problem_size,
+                    "pomo_size": self.problem.scale.effective_pomo_size,
+                },
+                "description": str(task.get("description") or ""),
+                "tips": str(task.get("tips") or ""),
+            },
+        )
+        inventory = records.knowledge_inventory(self.config, self.problem)
+        self.log(
+            f"records: knowledge base has {len(inventory)} file(s) under {records.main_dir(self.config)}"
+        )
+
+    def stage_retrieval(self, round_index: int = 0) -> gates.GateResult:
+        """Select knowledge for this problem before any analysis happens.
+
+        The only stage that reads the knowledge base in full. Its output is staged
+        read-only into every later stage's inputs, which is the entire reason the
+        knowledge has to be *selected* rather than dumped: eight retrieved files would
+        become eight files in every subsequent prompt.
+        """
+        stage_config = get_stage(self.config, "retrieval")
+        worktree = self._seed("retrieval", reset=round_index > 0)
+        self.state.start_stage("retrieval")
+        instructions = self.state.consume_instructions("retrieval")
+        outcome = run_agent_stage(
+            stage_config,
+            self.config,
+            self.run_dir,
+            worktree,
+            self.backend,
+            instructions,
+            round_index,
+        )
+        self._collect(worktree, ["artifacts/records"])
+        gate = gates.gate_retrieval(
+            self.run_dir, worktree, baseline=read_baseline(worktree)
+        )
+        self.state.finish_stage(
+            "retrieval",
+            status=DONE if gate.passed else FAILED,
+            message=self._records_message("retrieval", gate),
+            artifacts=["artifacts/records/retrieval.json"],
+            error="" if gate.passed else "; ".join(gate.issues[:3]),
+        )
+        if gate.passed:
+            self._publish_related()
+        self._write_record("description_parsing", outcome, {"gate": gate.describe()})
+        self.log(f"retrieval: {gate.describe()}")
+        return gate
+
+    def _publish_related(self) -> None:
+        """Copy the retrieval selection into `records/related/<run_id>/`."""
+        source = self.run_dir / "artifacts" / "records"
+        self.related_dir.mkdir(parents=True, exist_ok=True)
+        copied = 0
+        for path in sorted(source.glob("*")):
+            if path.is_file():
+                shutil.copy2(path, self.related_dir / path.name)
+                copied += 1
+        self.log(f"records: {copied} related file(s) published to {self.related_dir}")
+
+    def stage_update(self, round_index: int = 0) -> gates.GateResult:
+        """Fold this run's records into the cross-run knowledge base.
+
+        The agent writes `main/` inside its own worktree like every other stage -- so it
+        stays sandboxed and its output is inspectable -- and `_merge_main` promotes the
+        result. Merging in code (append + dedupe) is what keeps a bad run from erasing
+        knowledge an earlier run earned.
+        """
+        stage_config = get_stage(self.config, "update")
+        worktree = self._seed("update", reset=round_index > 0)
+        self.state.start_stage("update")
+        instructions = self.state.consume_instructions("update")
+        run_agent_stage(
+            stage_config,
+            self.config,
+            self.run_dir,
+            worktree,
+            self.backend,
+            instructions,
+            round_index,
+        )
+        self._collect(worktree, ["records/main", "artifacts/records"])
+        gate = gates.gate_update(self.run_dir, worktree, baseline=read_baseline(worktree))
+        merge_summary = ""
+        if gate.passed:
+            report = self._merge_main(worktree)
+            created = report.get("created") or []
+            merged = report.get("merged") or []
+            pruned = report.get("pruned_attempts") or 0
+            areas = sorted({name.split("/")[0] for name in created + merged})
+            merge_summary = (
+                f"created {len(created)}, merged {len(merged)}"
+                + (f" ({', '.join(areas)})" if areas else "")
+                + (f", pruned {pruned} old attempt block(s)" if pruned else "")
+            )
+            self.log(f"update: {gate.describe()}; merged {report}")
+        self.state.finish_stage(
+            "update",
+            status=DONE if gate.passed else FAILED,
+            message=self._records_message("update", gate, merge_summary),
+            artifacts=["records/main"],
+            error="" if gate.passed else "; ".join(gate.issues[:3]),
+        )
+        # No per-run record here on purpose: this stage's product *is* the knowledge
+        # base, and duplicating it into `temp/` would make the update agent read its own
+        # input back on the next run.
+        return gate
+
+    def _records_message(self, stage: str, gate: gates.GateResult, extra: str = "") -> str:
+        """A one-line stage message that says what the records layer actually did.
+
+        `gate.describe()` is always "<stage>: ok", which tells a reader of the dashboard
+        nothing about the stage that matters most for this feature: *what was retrieved*
+        and *what the knowledge base gained*. The detail is already on disk; this reads it
+        back rather than plumbing it through three call frames.
+        """
+        if not gate.passed:
+            detail = "; ".join(gate.issues[:3]) or "gate failed"
+            return f"{stage}: {detail}"
+
+        if stage == "retrieval":
+            payload = read_json(self.run_dir / "artifacts" / "records" / "retrieval.json", default={}) or {}
+            if payload.get("empty"):
+                return "retrieval: empty knowledge base (nothing to reuse yet)"
+            selected = payload.get("selected") or []
+            areas: dict[str, int] = {}
+            for item in selected:
+                if isinstance(item, dict):
+                    areas[str(item.get("area") or "other")] = areas.get(str(item.get("area") or "other"), 0) + 1
+            breakdown = ", ".join(f"{area} {count}" for area, count in sorted(areas.items()))
+            suffix = f" ({breakdown})" if breakdown else ""
+            return f"retrieval: selected {len(selected)} record(s){suffix}"
+
+        # update: the merge report is the interesting part, and it is produced before the
+        # message is composed.
+        return f"{stage}: {extra}" if extra else gate.describe()
+
+    def _merge_main(self, worktree: Path) -> dict[str, Any]:
+        """Promote the update agent's `main/` into the canonical knowledge base."""
+        source = worktree / "records" / "main"
+        outcome = str(self.state.data.get("status") or "")
+        report = records.merge_into_main(
+            self.config, self.problem, source, self.run_id, outcome=outcome
+        )
+        removed = records.prune_attempts(self.config, self.problem)
+        if removed:
+            report["pruned_attempts"] = removed
+        return report
+
+    def _write_record(
+        self,
+        kind: str,
+        outcome: Any,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        """Persist one agent turn's record (best effort: never fails the run).
+
+        The record is diagnostic value for the *next* project, not a gate for this one, so
+        a failure to write it is logged and swallowed rather than failing a run that
+        otherwise succeeded.
+        """
+        try:
+            result = getattr(outcome, "result", None)
+            payload: dict[str, Any] = {
+                "stage": outcome.stage,
+                "ok": bool(outcome.ok),
+                "duration_s": round(float(outcome.duration_s or 0.0), 3),
+                "notes": list(outcome.notes or []),
+                "payload": outcome.payload or {},
+                "agent_error": getattr(result, "error", "") if result else "",
+            }
+            payload.update(extra or {})
+            records.write_run_record(self.config, self.run_id, kind, payload)
+        except Exception as exc:  # noqa: BLE001 - see the docstring
+            self.log(f"records: could not write {kind!r} record ({exc})")
 
     # -- artifact plumbing -------------------------------------------------- #
 
@@ -183,6 +412,7 @@ class Orchestrator:
             error="" if gate.passed else "; ".join(gate.issues[:3]),
         )
         self._note_outcome(outcome, gate)
+        self._write_record("new_problem_code", outcome, {"gate": gate.describe()})
         return gate
 
     def stage_code_error(self, round_index: int = 0) -> tuple[gates.GateResult, dict[str, Any]]:
@@ -200,22 +430,92 @@ class Orchestrator:
             instance_glob=self.problem.instance_glob,
             full_iterations=iterations,
             extra_hints=self.problem.revision_hints(),
+            problem=self.problem,
         )
         # NOTE: run_checks writes into the canonical run directory, so nothing may
         # be "collected" from the worktree afterwards. The executor worktree has no
         # artifacts/runs of its own, and collect_artifacts replaces its target
         # directory -- collecting here would delete the report just written.
         gate = gates.gate_run_report(report)
+        narrative = self._narrate_error(worktree, report, round_index)
         self.state.finish_stage(
             "code_error",
             status=DONE if gate.passed else FAILED,
             message=run_report_summary(report),
-            artifacts=["artifacts/runs/s3_run_report.json"],
+            artifacts=["artifacts/runs/s3_run_report.json", "artifacts/runs/s3_error_narrative.json"],
             error="" if gate.passed else "; ".join(gate.issues[:3]),
         )
         self.state.set_costs(report.get("initial_cost"), report.get("best_cost"))
         self.log(f"code_error: {run_report_summary(report)}")
+        self._write_record(
+            "code_error",
+            narrative,
+            {
+                "passed": bool(report.get("passed")),
+                "failed_step": report.get("failed_step"),
+                "error_class": report.get("error_class"),
+                "findings": report.get("findings"),
+            },
+        )
         return gate, report
+
+    def _narrate_error(self, worktree: Path, report: dict[str, Any], round_index: int) -> Any:
+        """Have the model narrate the failure scene, then record it.
+
+        The executor already knows *what* failed (steps, return codes, error class) but
+        not what it *means*. This turn adds that reading, and -- because it is an agent
+        turn like any other -- it leaves both a run artifact and a record the update stage
+        can turn into a reusable note.
+
+        Skipped when there is nothing to narrate: a run whose gates all passed with no
+        findings gets a stub instead of a model call. With `loop.max_rounds` at 5, the
+        unconditional version would spend five turns per successful run explaining
+        successes.
+        """
+        findings = report.get("findings") or {}
+        nothing_to_say = bool(report.get("passed")) and not (findings.get("issues") or [])
+        stage_config = get_stage(self.config, "code_error")
+        if nothing_to_say:
+            stub = {
+                "stage": "code_error",
+                "ok": True,
+                "duration_s": 0.0,
+                "notes": ["narrative skipped: all gates passed with no findings"],
+                "payload": {"skipped": True, "reason": "all gates passed"},
+                "result": None,
+            }
+            write_json(
+                self.run_dir / "artifacts" / "runs" / "s3_error_narrative.json",
+                {"skipped": True, "reason": "all gates passed", "passed": True},
+            )
+            self.log("code_error: narration skipped (all gates passed, no findings)")
+            return _StubOutcome(**stub)
+
+        narrative_config = dict(stage_config)
+        narrative_config["name"] = "code_error"
+        narrative_config["prompt_key"] = "error_narrate"
+        narrative_config["produces"] = ["artifacts/runs/s3_error_narrative.json"]
+        outcome = run_agent_stage(
+            narrative_config,
+            self.config,
+            self.run_dir,
+            worktree,
+            self.backend,
+            None,
+            round_index,
+            extra_variables={
+                "round_index": str(round_index),
+                "failed_step": str(report.get("failed_step") or ""),
+                "error_class": str(report.get("error_class") or ""),
+                "error_message": str(report.get("error_message") or "")[:6000],
+                "revision_hint": str(report.get("revision_hint") or ""),
+                "run_report_path": "artifacts/runs/s3_run_report.json",
+                "findings_lines": _findings_lines(report),
+            },
+        )
+        self._collect(worktree, ["artifacts/runs"])
+        self.log(f"code_error: narration {'ok' if outcome.ok else 'failed'}")
+        return outcome
 
     def stage_code_revise(self, round_index: int, report: dict[str, Any]) -> gates.GateResult:
         stage_config = get_stage(self.config, "code_revise")
@@ -243,8 +543,28 @@ class Orchestrator:
             "error_message": str(report.get("error_message") or "")[:6000],
             "revision_hint": str(report.get("revision_hint") or ""),
             "run_report_path": "artifacts/revisions/round-%d-brief.json" % round_index,
+            "findings_lines": _findings_lines(report),
         }
         instructions = self.state.consume_instructions("code_revise")
+
+        # Turn 1: read the code. The executor's gate only knows what it can run and
+        # parse; the semantic problems (a baseline symbol that never made it across,
+        # a mask that is never consulted, a plotting path that cannot resolve) are
+        # found by reading. Doing it first means the repair turn fixes a reviewed
+        # list instead of guessing from one error message.
+        review_config = dict(stage_config)
+        review_config["prompt_key"] = "code_review"
+        run_agent_stage(
+            review_config,
+            self.config,
+            self.run_dir,
+            worktree,
+            self.backend,
+            instructions,
+            round_index,
+            extra_variables=extra_variables,
+        )
+
         outcome = run_agent_stage(
             stage_config,
             self.config,
@@ -256,7 +576,7 @@ class Orchestrator:
             extra_variables=extra_variables,
         )
         generated = self._generated_rel()
-        self._collect(worktree, [generated, "artifacts/revisions"])
+        self._collect(worktree, [generated, "artifacts/revisions", "artifacts/reviews"])
         gate = gates.gate_generated(
             self.run_dir, worktree, self.problem, baseline=read_baseline(worktree)
         )
@@ -264,9 +584,14 @@ class Orchestrator:
             "code_revise",
             status=DONE if gate.passed else FAILED,
             message=f"round {round_index}: {gate.describe()}",
-            artifacts=[f"artifacts/revisions/round-{round_index}-brief.json", generated],
+            artifacts=[
+                f"artifacts/revisions/round-{round_index}-brief.json",
+                "artifacts/reviews/",
+                generated,
+            ],
             error="" if gate.passed else "; ".join(gate.issues[:3]),
         )
+        self._write_record("code_revise", outcome, {"gate": gate.describe(), "round": round_index})
         self._note_outcome(outcome, gate)
         return gate
 
@@ -314,11 +639,23 @@ class Orchestrator:
     def run(self) -> dict[str, Any]:
         self.log(f"run: {self.run_dir}")
         self.log(f"CORAL shell: {coral_info().describe()}")
+        self.ensure_setup()
         self.ensure_instances()
+        self.ensure_records()
         self.state.record_event("run_start", run_dir=str(self.run_dir), problem=self.problem.slug)
         self.state.save()
 
         loop = loop_config(self.config)
+
+        # Retrieval comes first: it is the only stage that reads the knowledge base, and
+        # everything it selects is handed to analysis. It is also *advisory*: finding
+        # nothing, or failing, must not stop the run. A new problem has no history, and the
+        # records are reference material rather than a contract -- so both outcomes are
+        # logged and analysis proceeds either way.
+        retrieval_gate = self.stage_retrieval()
+        if not retrieval_gate.passed:
+            self.log("retrieval unavailable; analysis proceeds without records")
+
         analysis_gate = self.stage_analysis()
         if not analysis_gate.passed:
             self.state.finish("failed")
@@ -385,6 +722,13 @@ class Orchestrator:
                 )
             elif not grader_bundle.get("feasible", False):
                 reason = "grader rejected the generated program"
+
+        # Last, and deliberately after the outcome is decided: the update stage folds this
+        # run into the cross-run knowledge base. Running it before the verdict would let a
+        # failed run's lessons be written as if they had worked.
+        update_gate = self.stage_update()
+        if not update_gate.passed:
+            self.log("update produced nothing usable; the knowledge base is unchanged")
         return self._finalize(success=success, reason=reason)
 
     # -- export ------------------------------------------------------------- #
@@ -404,15 +748,113 @@ class Orchestrator:
         }
 
     def _export(self) -> Path:
+        """Publish the run: the generated files, plus the runtime payload they need.
+
+        The export mirrors the *worktree* layout rather than flattening it, because
+        the generated code resolves its dependencies by relative position: it imports
+        POMO's toolchain as `pomo.…` and its own modules by bare name, which only
+        works when the directory holding `pomo/` is the root the program runs from.
+        A flat copy would be unreadable *and* unrunnable -- `ModuleNotFoundError` on
+        the first import.
+
+        The support payload comes from `resources.export` (plus `workspace.export`),
+        so the same mechanism works for any problem that ships a reference
+        implementation. Unchanged baseline sources are still not part of
+        `artifacts/generated/`; this only decides what travels with the run.
+        """
         generated = self.run_dir / self._generated_rel()
-        self.final_dir.mkdir(parents=True, exist_ok=True)
-        target = self.final_dir / self.slug
-        if target.exists():
-            shutil.rmtree(target, ignore_errors=True)
+        spec = self._export_spec()
+        mirror = (self.final_dir / self.slug).resolve()
+        if mirror.exists():
+            shutil.rmtree(mirror, ignore_errors=True)
+        mirror.mkdir(parents=True, exist_ok=True)
+
+        target = mirror / self._generated_rel()
         if generated.is_dir():
-            shutil.copytree(generated, target)
+            _copy_tree_filtered(generated, target)
         self.log(f"exported final code to {target}")
-        return target
+
+        for item in spec["include"]:
+            source = Path(item) if Path(item).is_absolute() else self._baseline_root() / item
+            if not source.exists():
+                self.log(f"  export: {item} declared but not found at {source}; skipped")
+                continue
+            destination = mirror / Path(item).name
+            _copy_tree_filtered(source, destination, exclude=spec["exclude"])
+            self.log(f"  export: bundled {item} ({_describe_tree(destination)})")
+
+        self._extend_export_readme(mirror, spec)
+        return mirror
+
+    def _baseline_root(self) -> Path:
+        """Where `resources.export` entries are resolved from."""
+        raw = (self.problem.spec.get("resources") or {}).get("baseline_dir")
+        if not raw:
+            return self.problem.root
+        candidate = resolve_path(self.config, str(raw))
+        return candidate if candidate.is_dir() else self.problem.root
+
+    def _export_spec(self) -> dict[str, Any]:
+        """Merge `resources.export` with any `workspace.export` override."""
+        resources = self.problem.spec.get("resources") or {}
+        raw = resources.get("export") or {}
+        spec: dict[str, Any] = {
+            "mirror_root": str(raw.get("mirror_root") or "."),
+            "include": [str(item) for item in (raw.get("include") or [])],
+            "exclude": [str(item) for item in (raw.get("exclude") or [])] or ["__pycache__"],
+        }
+        override = (self.config.get("workspace") or {}).get("export") or {}
+        if isinstance(override, dict):
+            if override.get("include") is not None:
+                spec["include"] = [str(item) for item in override["include"]]
+            if override.get("exclude") is not None:
+                spec["exclude"] = [str(item) for item in override["exclude"]]
+            if override.get("mirror_root") is not None:
+                spec["mirror_root"] = str(override["mirror_root"])
+        return spec
+
+    def _extend_export_readme(self, mirror: Path, spec: dict[str, Any]) -> None:
+        """Append the operational section: how to run what was just exported.
+
+        Written here rather than required from the agent because it describes the
+        *bundle*, not the code: it depends on what the export actually carried.
+        """
+        readme = mirror / self._generated_rel() / "README.md"
+        bundle_lines = [
+            "",
+            "## Running this bundle",
+            "",
+            "This directory is self-contained: run everything **from this directory**, so",
+            "that `pomo/` (bundled next to `artifacts/generated/`) resolves as the generated",
+            "code expects.",
+            "",
+            "```bash",
+            "# evaluate / improve on one instance",
+            f"python {self._generated_rel()}/{self.problem.program} --path <instance.json> --iteration 100",
+            "",
+            "# train (writes checkpoints and logs under artifacts/generated/result/)",
+            f"cd {self._generated_rel()} && python {self._entry_name('train')}",
+            "",
+            "# evaluate the model you just trained (test_* prefers the newest",
+            "# checkpoint under result/, falling back to a pretrained one if you place it",
+            "# in checkpoints/)",
+            f"cd {self._generated_rel()} && python {self._entry_name('test')}",
+            "```",
+            "",
+            "Bundled runtime payload: " + (", ".join(f"`{item}`" for item in spec["include"]) or "(none)"),
+            "",
+        ]
+        text = "# Generated deliverable\n\n(see the code-generation summary below)\n"
+        if readme.is_file():
+            text = readme.read_text(encoding="utf-8")
+        if "## Running this bundle" in text:
+            return
+        readme.parent.mkdir(parents=True, exist_ok=True)
+        readme.write_text(text.rstrip() + "\n" + "\n".join(bundle_lines), encoding="utf-8")
+
+    def _entry_name(self, kind: str) -> str:
+        entries = (self.problem.spec.get("generated") or {}).get("entries") or {}
+        return str(entries.get(kind) or f"{kind}.py")
 
     def _write_report(self, success: bool, reason: str) -> Path:
         analysis = read_json(self.run_dir / gates.ANALYSIS_REL, default={}) or {}
@@ -510,7 +952,10 @@ class Orchestrator:
 
         lines.append("Declared artifacts:")
         lines.append("")
+        stage_status = {str(s["name"]): (self.state.stage(s["name"]).get("status") or "pending")
+                        for s in self.config.get("stages", [])}
         for stage in self.config.get("stages", []):
+            status = stage_status.get(str(stage.get("name")))
             for relative in stage.get("produces") or []:
                 path = self.run_dir / str(relative)
                 exists = path.exists()
@@ -519,8 +964,20 @@ class Orchestrator:
                     detail = f" ({path.stat().st_size} B)"
                 elif path.is_dir():
                     count = sum(1 for _ in path.rglob("*") if _.is_file())
-                    detail = f" ({count} file(s))"
-                mark = "ok " if exists else "MISSING"
+                    # An empty directory is a scaffold artefact, not a deliverable: the
+                    # worktree is seeded with the declared tree, so `[ok]` on a directory
+                    # with no files in it reads as "this stage produced its output" when
+                    # the stage never ran.
+                    if count == 0:
+                        detail = f" (0 file(s) -- empty, stage is {status})"
+                    else:
+                        detail = f" ({count} file(s))"
+                if not exists:
+                    mark = "MISSING"
+                elif path.is_dir() and not any(path.rglob("*")):
+                    mark = "--  "
+                else:
+                    mark = "ok  "
                 lines.append(f"- [{mark}] `{relative}`{detail}")
         lines.append("")
 
@@ -543,7 +1000,12 @@ class Orchestrator:
             else:
                 lines.append(f"- instruction: MISSING at `{instruction}`")
             if log_path is not None:
-                lines.append(f"- agent log: `{log_path}` ({log_path.stat().st_size} B)")
+                size = log_path.stat().st_size
+                # A claude_code log is JSON per event, including per-thought token counts:
+                # a normal analysis turn reaches several MB, and a reader should know that
+                # is expected rather than a symptom.
+                note = " -- large, expected for this backend" if size > 1_000_000 else ""
+                lines.append(f"- agent log: `{log_path}` ({size} B{note})")
             else:
                 lines.append(f"- agent log: none under `{self.run_dir / 'logs'}`")
             lines.append("")
@@ -575,6 +1037,67 @@ class Orchestrator:
         return lines
 
 
+@dataclass
+class _StubOutcome:
+    """A stand-in for a skipped agent turn, shaped like `StageOutcome`.
+
+    Used where the engine deliberately does not call the model (the error narration on a
+    clean round). Reusing the real shape keeps `_write_record` and the report code
+    branch-free.
+    """
+
+    stage: str
+    ok: bool
+    duration_s: float = 0.0
+    notes: list[str] = field(default_factory=list)
+    payload: dict[str, Any] = field(default_factory=dict)
+    result: Any = None
+
+
+def _copy_tree_filtered(source: Path, target: Path, exclude: list[str] | None = None) -> None:
+    """Copy a tree, dropping cache directories and named exclusions.
+
+    `__pycache__` and `*.pyc` are meaningless in an export, and a reference
+    implementation may hold training output (`result/`) that would balloon the
+    bundle with logs and intermediate weights.
+    """
+    blocked = set(exclude or []) | {"__pycache__"}
+    if target.exists():
+        shutil.rmtree(target, ignore_errors=True)
+    shutil.copytree(
+        source,
+        target,
+        ignore=shutil.ignore_patterns(*blocked, "*.pyc"),
+        dirs_exist_ok=True,
+    )
+
+
+def _describe_tree(path: Path) -> str:
+    if path.is_file():
+        return f"{path.stat().st_size} B"
+    files = [item for item in path.rglob("*") if item.is_file()]
+    total = sum(item.stat().st_size for item in files)
+    return f"{len(files)} file(s), {total / 1024:.0f} KiB"
+
+
+def _findings_lines(report: dict[str, Any]) -> str:
+    """The executor's static findings, as prompt-ready lines.
+
+    The gate only *fails* on some of them; the rest are drift the revise agent should
+    fix while it is already in the file. Rendering both keeps the repair turn from
+    being followed by a second, near-identical round.
+    """
+    findings = report.get("findings") or {}
+    issues = list(findings.get("issues") or [])
+    warnings = list(findings.get("warnings") or [])
+    lines: list[str] = []
+    lines.extend(f"  - FAIL: {item}" for item in issues)
+    lines.extend(f"  - note: {item}" for item in warnings)
+    if not lines:
+        return "  (the executor's static checks found nothing)"
+    return "\n".join(lines)
+
+
 def _serializable_config(config: dict[str, Any]) -> dict[str, Any]:
     """Drop the live plugin object before writing the config to disk."""
     return {key: value for key, value in config.items() if not key.startswith("_")}
@@ -597,11 +1120,13 @@ def start(
 
 #: Stages a replay can drive, mapped to the method that runs them.
 REPLAYABLE_STAGES = (
+    "retrieval",
     "analysis",
     "code_generation",
     "code_error",
     "code_revise",
     "feasibility",
+    "update",
 )
 
 
@@ -636,11 +1161,14 @@ def replay_stage(
         raise FileNotFoundError(f"run directory not found: {run_dir}")
 
     orchestrator = Orchestrator(config, results_dir=results_dir, run_dir=run_dir)
+    orchestrator.ensure_setup()
     orchestrator.ensure_instances()
     orchestrator.state.record_event("stage_replay", stage=stage)
     orchestrator.log(f"replay: stage {stage} in {run_dir}")
 
-    if stage == "analysis":
+    if stage == "retrieval":
+        gate = orchestrator.stage_retrieval()
+    elif stage == "analysis":
         gate = orchestrator.stage_analysis()
     elif stage == "code_generation":
         gate = orchestrator.stage_code_generation()
@@ -649,6 +1177,8 @@ def replay_stage(
     elif stage == "code_revise":
         report = read_json(run_dir / "artifacts" / "runs" / "s3_run_report.json", default={}) or {}
         gate = orchestrator.stage_code_revise(int(orchestrator.state.data.get("round") or 1) or 1, report)
+    elif stage == "update":
+        gate = orchestrator.stage_update()
     else:  # feasibility
         gate, _ = orchestrator.stage_feasibility()
 

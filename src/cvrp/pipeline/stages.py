@@ -123,6 +123,19 @@ def stage_prompt_path(stage_config: dict[str, Any], config: dict[str, Any]) -> P
     return Path(raw) if raw else None
 
 
+def _scale_lines(problem: Any) -> str:
+    """One block describing the task's instance size, for the stage prompts."""
+    scale = problem.scale
+    return "\n".join(
+        [
+            f"  - problem_size (customers) = {scale.problem_size}",
+            f"  - depot + customers (an instance's `DIMENSION`) = {scale.problem_size + 1}",
+            f"  - pomo_size (parallel rollouts per instance) = {scale.effective_pomo_size}",
+            f"  - augmentation factor = {scale.aug_factor}",
+        ]
+    )
+
+
 def stage_variables(
     stage_config: dict[str, Any],
     config: dict[str, Any],
@@ -163,6 +176,14 @@ def stage_variables(
         "problem_name": problem.name if problem else "",
         "variant_label": str((problem.spec.get("variant_label") if problem else "") or ""),
         "problem_context": problem.agent_context() if problem else "",
+        # instance size -- the one number a task declares, spelled several ways
+        # because prompts refer to it in prose ("50 customers"), in file names
+        # (`train_n50.py`) and in the POMO rollout size.
+        "problem_size": str(problem.problem_size) if problem else "",
+        "problem_size_plus_depot": str(problem.problem_size + 1) if problem else "",
+        "pomo_size": str(problem.scale.effective_pomo_size) if problem else "",
+        "aug_factor": str(problem.scale.aug_factor) if problem else "",
+        "scale_lines": _scale_lines(problem) if problem else "",
         # generated package
         "generated_dir": generated_dir,
         "program": problem.program if problem else "run.py",
@@ -195,6 +216,8 @@ def stage_variables(
         "baseline_dir": str(resources.get("baseline_dir") or "baseline"),
         "baseline_notes": str(resources.get("notes") or "BASELINE_NOTES.md"),
         "checkpoint": str(resources.get("checkpoint") or ""),
+        "checkpoint_dir": str(resources.get("checkpoint_dir") or "checkpoints"),
+        "checkpoint_glob": str(resources.get("checkpoint_glob") or "checkpoint*.pt"),
         "resource_subdirs": ", ".join(str(item) for item in (resources.get("baseline_subdirs") or [])),
         # generic execution facts
         "python": "the interpreter running this project (`uv run` venv)",
@@ -236,11 +259,112 @@ def render_instruction(
             f"declare it under `prompts:` in the problem's problem.yaml)_"
         )
     sections.append("# Context\n\n" + _render(_context_block(stage_config), variables).strip())
+    records_block = _records_section(stage_config, config)
+    if records_block:
+        sections.append(records_block)
     if instructions:
         joined = "\n".join(f"- {item}" for item in instructions)
         sections.append("# Operator instructions (from the dashboard)\n\n" + joined)
     sections.append(_render(EXECUTION_CONTRACT, variables))
     return "\n\n".join(sections).strip() + "\n"
+
+
+#: Stages whose instruction carries knowledge-base or retrieval material. Deliberately
+#: short: the code generation, error and revise stages work from the analysis contract
+#: and from what the code actually does when it runs. Feeding them historical prose
+#: lengthens their prompts and invites them to follow a previous run instead of the
+#: pipeline's own evidence.
+RECORDS_STAGES = ("retrieval", "analysis")
+
+
+def _records_section(stage_config: dict[str, Any], config: dict[str, Any]) -> str:
+    """The `# Related records` block, for the two stages that read records.
+
+    The engine renders this rather than relying on each prompt to remember a
+    placeholder: a stage that must read the knowledge base cannot be allowed to skip it
+    because a template was edited.
+    """
+    from cvrp.records import candidates, inventory, main_dir, read_text, related_dir
+
+    name = stage_config["name"]
+    if name not in RECORDS_STAGES:
+        return ""
+    run_id = str(config.get("_run_id") or "")
+    # Absolute paths, because the agent's working directory is the stage worktree while
+    # the knowledge base lives in the project. Quoting a path it cannot resolve relative
+    # to its cwd is how a stage silently reads nothing.
+    root = main_dir(config).resolve()
+    lines: list[str] = ["# Related records", ""]
+
+    if name == "retrieval":
+        files = inventory(config)
+        if not files:
+            lines += [
+                "The knowledge base is **empty** (`%s` does not exist or holds no records):"
+                % root,
+                "this is the first run for this problem. Say so explicitly in your output",
+                '(`"empty": true` plus a one-line `note`) and carry on -- the pipeline',
+                "continues either way, and finding nothing is a normal result, not a failure.",
+            ]
+            return "\n".join(lines)
+        description = str(((config.get("task") or {}).get("description") or ""))
+        ranked = candidates(config, description)
+        lines += [
+            f"The knowledge base is `{root}`. **Read every file below in full** before",
+            "selecting anything -- the ranking is a lexical hint, not a decision, and a file",
+            "can be relevant with a score of 0.",
+            "",
+            "## What exists",
+            "",
+        ]
+        lines += [
+            f"- `{root / item['path'].split('main/', 1)[-1]}` ({item['bytes']} B)"
+            if item["path"].startswith("main/")
+            else f"- `{item['path']}` ({item['bytes']} B)"
+            for item in files
+        ]
+        lines += ["", "## Ranked as most similar to this problem description", ""]
+        for item in ranked:
+            matched = ", ".join(item["matched"]) or "(no lexical overlap)"
+            lines.append(f"- `{item['path']}` (score {item['score']}; matched: {matched})")
+            for key in item.get("key_lines", [])[:24]:
+                lines.append(f"    {key}")
+        return "\n".join(lines)
+
+    # analysis: the retrieval stage's output, staged read-only for this stage
+    folder = Path(config.get("_records_related_dir") or related_dir(config, run_id))
+    if not folder.is_dir():
+        lines += [
+            "No retrieval output was staged for this run, so there is nothing to consult.",
+            "Carry on with the task and the available inputs; this is normal for a problem",
+            "with no history.",
+        ]
+        return "\n".join(lines)
+    lines += [
+        "Background material the retrieval stage selected for **this** problem. Read it, then",
+        "do your own job: this is reference, not a contract.",
+        "",
+        "- It may shape your wording, the order of your plan, a threshold, or a trap you now",
+        "  know to avoid. It does not have to become a plan item, and nothing here is checked",
+        "  against your plan.",
+        "- If you want the decision recorded, describe it in `related_knowledge` (optional):",
+        "  `used` = `{source, influence}` where `influence` says in your own words what the",
+        "  record changed, and `rejected` = `{source, reason}`. Missing or thin entries are",
+        "  reported as advice and never fail the stage.",
+        "- A record that does not apply is not a problem. Say so and move on; deriving the",
+        "  answer from the task description and the staged baseline is always allowed.",
+        "",
+    ]
+    for path in sorted(folder.glob("*")):
+        if path.suffix not in {".md", ".json"}:
+            continue
+        lines += [
+            f"## {path.name}",
+            "",
+            read_text(path, max_chars=12_000).strip() or "(empty)",
+            "",
+        ]
+    return "\n".join(lines)
 
 
 def _context_block(stage_config: dict[str, Any]) -> str:

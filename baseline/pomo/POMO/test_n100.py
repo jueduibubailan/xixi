@@ -21,7 +21,7 @@ sys.path.insert(0, "../..")  # for utils
 # import
 
 import logging
-from CVRP.POMO.utils.utils import create_logger, copy_all_src
+from pomo.POMO.utils.utils import create_logger, copy_all_src
 
 from CVRPTester import CVRPTester as Tester
 

@@ -35,3 +35,8 @@ workspace/worktrees/
 # Both are the same POMO CVRP100 checkpoint. Commit one of them (the shared copy
 # is the better candidate); the other is reproducible from it.
 # **/checkpoints/*.pt
+
+# Cross-run records: the durable knowledge base (records/main) is worth committing;
+# per-run temp evidence and retrieval selections are not.
+records/temp/
+records/related/

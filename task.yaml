@@ -85,6 +85,13 @@ llm:
 # executors check, comes from the problem. `prompt` may be given here to override
 # the problem's own prompt for this task only.
 stages:
+  - name: retrieval
+    kind: agent
+    role: "src/cvrp/roles/retrieval_agent.md"
+    prompt: retrieval
+    produces: ["artifacts/records/retrieval.json"]
+    timeout_seconds: 1800
+
   - name: analysis
     kind: agent
     role: "src/cvrp/roles/analysis_agent.md"
@@ -95,19 +102,19 @@ stages:
   - name: code_generation
     kind: agent
     role: "src/cvrp/roles/code_generation_agent.md"
-    produces: ["artifacts/generated/run.py"]
+    produces: ["artifacts/generated/"]
     timeout_seconds: 3600
 
   - name: code_error
     kind: executor            # no LLM
     role: "src/cvrp/roles/code_error_agent.md"
     produces: ["artifacts/runs/s3_run_report.json"]
-    steps: [py_compile, smoke_run, full_run]
+    steps: [py_compile, import_probe, smoke_run, full_run]
 
   - name: code_revise
     kind: agent
     role: "src/cvrp/roles/code_revise_agent.md"
-    produces: ["artifacts/revisions/"]
+    produces: ["artifacts/revisions/", "artifacts/reviews/"]
     timeout_seconds: 3600
 
   - name: feasibility
@@ -115,6 +122,14 @@ stages:
     role: "src/cvrp/roles/feasibility_agent.md"
     produces: ["artifacts/runs/s5_feasibility.json"]
 
+  # Last: the knowledge base is only written once the verdict is known, so a failed run
+  # cannot record its lessons as if they had worked.
+  - name: update
+    kind: agent
+    role: "src/cvrp/roles/update_agent.md"
+    prompt: update
+    produces: ["records/main"]
+    timeout_seconds: 1800
 loop:
   # code_error -> code_revise -> code_error, until the acceptance contract passes.
   on: ["code_error", "code_revise"]
@@ -137,9 +152,30 @@ grader:
     # by default. Set to false only if you deliberately accept unverified runs.
     require_solution_dump: true
 
+records:
+  # Where the cross-run knowledge base lives. `dir` may be absolute if several projects
+  # should share one -- the point of the feature is that a new project can read what an
+  # earlier one learned.
+  dir: "./records"
+  main: main          # skills/notes/attempts: the durable part
+  related: related    # what retrieval selected, per run
+  temp: temp          # one record per agent, per run
+  max_candidates: 8   # retrieval's ranked shortlist size
+  keep_attempts: 20   # attempts blocks kept per problem
+  include_in_export: false
+
+
 workspace:
   results_dir: "./results"
   final_dir: "./workspace/final"
+  # The executor runs the generated program with *this* project's interpreter
+  # (sys.executable), not with whatever `python` is first on PATH. The generated
+  # POMO solver needs torch, so it is installed here rather than assumed.
+  # `uv pip install` is a fast no-op once satisfied, and this whole block runs only
+  # when its text changes (fingerprinted under .cvrp/setup.json), or with
+  # `cvrp start ... run.setup=force`.
+  setup:
+    - "uv pip install torch --index-url https://download.pytorch.org/whl/cpu"
 
 run:
   verbose: true

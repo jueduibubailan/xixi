@@ -1,0 +1,351 @@
+{
+  "problem_type": "CVRPTW",
+  "full_name": "Capacitated Vehicle Routing Problem with Time Windows",
+  "summary": "CVRPTW: capacity plus time windows on POMO's CVRP environment. Travel time IS the Euclidean distance -- no vehicle speed is introduced anywhere. The rollout is the unmodified POMO decoder (encoder input frozen at 2 dims for the depot and 3 dims for a node, so the pretrained encoder still loads), driven by one action mask. Per decision step (batch b, rollout p, candidate node j) the mask is the union of four predicates: (i) j already served (existing visited rule), (ii) the route load would exceed capacity (existing capacity rule, kept in POMO's normalized units where the tank starts at 1.0), (iii) arrival(b,p,j) = current_time[b,p] + ||xy[current_node[b,p]] - xy[j]|| > due_j - 1e-3, (iv) completion = max(arrival, ready_j) + service_j > horizon - 1e-3. Index 0 (the depot) is exempt from (iii) and (iv), never masked by (ii) because its demand is 0, and is deliberately re-opened by the existing visited rule whenever the vehicle is not standing on it -- that exception is what makes the state deadlock-free: a state in which no customer is reachable can always be escaped by returning to the depot, where current_time resets to 0 and every remaining customer is admissible again (measured on all three shipped n=100 instances: min_j(due_j - dist(0,j)) = 0.496 and 0 customers whose direct depot trip leaves the horizon). The only two selections that do not consult the mask are POMO's fixed first two moves (depot; rollout p starts at customer p+1), which the same measurement makes safe, and which the run path must therefore re-validate before dumping. Objective: minimize total travel distance; POMO's reward is its negative. Feasibility must not depend on the learned weights -- with an empty checkpoints/ drop box the trajectory is still feasible, only worse.",
+  "constraints": [
+    {
+      "id": "C1",
+      "name": "Visit once",
+      "rule": "every customer id 1..n must be served exactly once across all routes: never twice, and none left unserved when the rollout terminates."
+    },
+    {
+      "id": "C2",
+      "name": "Capacity",
+      "rule": "the served demand on a route must never exceed the vehicle capacity: sum(demand_i) <= capacity, equivalently sum(demand_i / capacity) <= 1.0 in the environment's normalized units."
+    },
+    {
+      "id": "C3",
+      "name": "Time window",
+      "rule": "arrival at customer j must satisfy arrival <= due_j; early arrival is legal and the vehicle waits (start = max(arrival, ready_j)). Arrival is measured on the distance-based clock, per `semantics`."
+    },
+    {
+      "id": "C4",
+      "name": "Horizon",
+      "rule": "service at any served customer must complete by the depot's closing time: max(arrival, ready_j) + service_j <= horizon, where horizon = time_windows[0][1]."
+    },
+    {
+      "id": "C5",
+      "name": "Depot route shape",
+      "rule": "every route is a list of node ids that starts at 0, ends at 0, and contains no customer before its start or after its end; only the depot may appear more than once in the sequence."
+    }
+  ],
+  "state_variables": [
+    {
+      "name": "depot_node_xy",
+      "shape": "(batch, n+1, 2)",
+      "dtype": "float32",
+      "update": "static per episode: torch.cat((depot_xy, node_xy), dim=1) in load_problems; augmented 8-fold with the other coordinate tensors.",
+      "reason": "existing POMO state; the only place the encoder reads from, and therefore frozen."
+    },
+    {
+      "name": "depot_node_demand",
+      "shape": "(batch, n+1)",
+      "dtype": "float32",
+      "update": "static per episode: depot demand 0 followed by node_demand / capacity (normalized units).",
+      "reason": "existing POMO state; feeds the capacity mask. The division by the instance's capacity on JSON load is new and mandatory."
+    },
+    {
+      "name": "time_windows",
+      "shape": "(batch, n+1, 2)",
+      "dtype": "float32",
+      "update": "static per episode: loaded from the instance json ([ready, due] per node, index 0 = [0, horizon]); for random training instances generated together with the coordinates; under 8-fold augmentation it is node_demand.repeat(8, 1) -- repeated, never transformed.",
+      "reason": "the ready/due pair every mask and every clock update reads. The 8 augmentation transforms are reflections and a transpose, i.e. isometries, so pairwise distances (and therefore windows derived from distances) are unchanged; transforming the windows would be wrong."
+    },
+    {
+      "name": "service_times",
+      "shape": "(batch, n+1)",
+      "dtype": "float32",
+      "update": "static per episode: index 0 = 0.0, customers carry the instance's service time (0.05 in the shipped data).",
+      "reason": "the clock advances by the service time of the node just served."
+    },
+    {
+      "name": "current_time",
+      "shape": "(batch, pomo)",
+      "dtype": "float32",
+      "update": "reset to 0; per step: arrival = current_time + dist(previous_node, selected); current_time = max(arrival, ready_selected) + service_selected; set to 0 wherever at_the_depot.",
+      "reason": "new dynamic state. This is the only time quantity that exists at a decision step, and it is exactly what the checker's replay calls `now`."
+    },
+    {
+      "name": "load",
+      "shape": "(batch, pomo)",
+      "dtype": "float32",
+      "update": "existing POMO update: load -= demand[selected]; load[at_the_depot] = 1 (refill).",
+      "reason": "the remaining capacity fraction; the capacity mask is load + eps < demand."
+    },
+    {
+      "name": "current_node",
+      "shape": "(batch, pomo)",
+      "dtype": "int64",
+      "update": "existing: current_node = selected at the top of step().",
+      "reason": "the origin of every candidate arrival. Trap: the arrival leg must be computed with the PREVIOUS node before this assignment happens, otherwise dist(j,j)=0."
+    },
+    {
+      "name": "visited_ninf_flag",
+      "shape": "(batch, pomo, n+1)",
+      "dtype": "float32",
+      "update": "existing: -inf at the selected node; index 0 is set back to 0 whenever the vehicle is not at the depot.",
+      "reason": "carries both the visit-once constraint and the depot-reopening exception."
+    },
+    {
+      "name": "ninf_mask",
+      "shape": "(batch, pomo, n+1)",
+      "dtype": "float32",
+      "update": "composed at the end of every step(): clone of visited_ninf_flag, then capacity, then time window, then horizon, then index 0 forced back to 0, then the existing finished reopen.",
+      "reason": "the single tensor the decoder consumes; its shape and -inf semantics must not change."
+    },
+    {
+      "name": "finished",
+      "shape": "(batch, pomo)",
+      "dtype": "bool",
+      "update": "existing: True once the visited rule masks every customer; the mask then leaves only the depot, which terminates the sequence.",
+      "reason": "rollout termination; also the reason a completed route always ends on node 0."
+    },
+    {
+      "name": "selected_node_list",
+      "shape": "(batch, pomo, T)",
+      "dtype": "int64",
+      "update": "existing: the selected node ids appended once per step, starting with the depot at t=0.",
+      "reason": "the route sequence source for the solution dump: split at 0, drop the leading empty segment, and drop any [0, 0] idle segment."
+    }
+  ],
+  "masking_rules": [
+    {
+      "name": "visited_mask",
+      "condition": "visited_ninf_flag[b, p, j] == -inf, i.e. customer j (j >= 1) has already been served; j = 0 is exempt.",
+      "tensor": "visited_ninf_flag",
+      "shape": "(batch, pomo, n+1)",
+      "exception": "index 0 is set back to 0 whenever at_the_depot is False (visited_ninf_flag[:, :, 0][~at_the_depot] = 0), so the depot can always be selected from anywhere; while the vehicle stands on the depot the depot itself stays masked, which is what stops depot->depot idling.",
+      "notes": "existing baseline rule, unchanged (the block is inline in CVRPEnv.step; there is no _get_logit_mask / _update_ninf_mask in this baseline)."
+    },
+    {
+      "name": "capacity_mask",
+      "condition": "demand_j > load[b, p] - CAP_MARGIN, with CAP_MARGIN = 1e-5 in normalized units, i.e. demask only when the remaining load covers the demand with room to spare.",
+      "tensor": "ninf_mask",
+      "shape": "(batch, pomo, n+1)",
+      "exception": "index 0 has demand 0 and is never masked by this rule. POMO's baseline tolerance is used the other way round: `load + round_error_epsilon < demand` admits an overshoot of 1e-5 normalized = 3e-4 raw units with capacity 30.0, while the independent checker tolerates 1e-6 raw -- so the comparison must be rewritten conservatively (`demand > load - CAP_MARGIN`), not copied verbatim.",
+      "notes": "existing rule, tighter tolerance. The unit mismatch is deliberate: the margin is chosen so a route can never exceed capacity in the checker's raw units."
+    },
+    {
+      "name": "time_window_mask",
+      "condition": "arrival(b,p,j) > due_j - TIME_MARGIN, where arrival(b,p,j) = current_time[b,p] + dist(depot_node_xy[b, current_node[b,p]], depot_node_xy[b, j]) and TIME_MARGIN = 1e-3 raw units; index 0 exempt.",
+      "tensor": "ninf_mask",
+      "shape": "(batch, pomo, n+1)",
+      "exception": "index 0 (the depot) is exempt and forced back to 0 whichever way the test comes out (ninf_mask[:, :, 0] = 0). Without this exemption a vehicle whose clock has passed the horizon would find its own depot masked and the state would have no legal action at all.",
+      "notes": "new. Only state that exists at the decision step is used: current_node, current_time, the instance coordinates and the instance windows -- no departure-time or lookahead quantity. The 1e-3 margin is set in the checker's raw units: the environment accumulates the clock in float32 over up to ~101 legs while the checker accumulates in float64, so a mask that sits exactly on the boundary can pass the mask and still violate the replay."
+    },
+    {
+      "name": "horizon_mask",
+      "condition": "max(arrival(b,p,j), ready_j) + service_j > horizon - TIME_MARGIN, where horizon = time_windows[b, 0, 1]; index 0 exempt.",
+      "tensor": "ninf_mask",
+      "shape": "(batch, pomo, n+1)",
+      "exception": "index 0 exempt (returning home is never a horizon violation; the depot's own window is not enforced on arrival).",
+      "notes": "new. The independent checker enforces the horizon only at the LAST customer of each route, so this mask is strictly stronger for interior customers -- which is the safe direction: any solution the mask admits also passes the checker's narrower test, and the depot return stays available so the extra strictness cannot deadlock."
+    },
+    {
+      "name": "depot_legal_rule",
+      "condition": "ninf_mask[b, p, 0] = 0 applied after the four predicates are unioned, except when the vehicle is already standing on the depot (the visited rule's own behaviour).",
+      "tensor": "ninf_mask",
+      "shape": "(batch, pomo)",
+      "exception": "this IS the exception -- the clause that makes every other mask escapable.",
+      "notes": "new, and the deadlock-freedom argument depends on it. A customer whose window has closed can never make the state unsolvable: the vehicle returns to the depot (legal in every state), current_time resets to 0, and every remaining customer is admissible again because it is reachable directly from the depot within its own window (see measured_invariants)."
+    },
+    {
+      "name": "finished_termination_rule",
+      "condition": "ninf_mask[:, :, 0][finished] = 0 -- once every customer is visited, only the depot stays selectable, so the last move is a depot selection and the sequence ends on node 0.",
+      "tensor": "ninf_mask",
+      "shape": "(batch, pomo)",
+      "exception": "none; this rule drives termination, not feasibility.",
+      "notes": "existing baseline rule, kept last in the composition so it is not undone by the new masks."
+    },
+    {
+      "name": "pomo_start_moves_bypass_mask",
+      "condition": "selected_count == 0 selects node 0 for every rollout and selected_count == 1 selects customer p+1 for rollout p (both inside CVRPModel.forward), without consulting ninf_mask.",
+      "tensor": "n/a (CVRPModel.forward)",
+      "shape": "n/a",
+      "exception": "safe on the shipped data because every customer is directly reachable from the depot inside its own window and inside the horizon; the run path must still re-validate the final solution before dumping it, so a mis-generated instance cannot become an infeasible dump.",
+      "notes": "This is the only place where a selection is not mask-governed. It is POMO's multi-start design (rollout p pinned to start at customer p+1, which requires pomo_size == problem_size), so it must be kept -- but the plan does not pretend it is mask-enforced. Measured: min_j(due_j - dist(0,j)) = 0.496, and 0 customers whose direct depot trip ends beyond the horizon, over all three n=100 instances."
+    }
+  ],
+  "feasibility_checklist": [
+    "every customer id 1..n appears exactly once across the union of all routes (no duplicates, none missing);",
+    "every route is a non-empty list whose first and last element is 0 and which contains no other 0;",
+    "for each route, the sum of the raw demands of its customers is <= capacity + 1e-6;",
+    "replaying a route from node 0 with now = 0: for each customer in order, now += euclid(previous, node); a violation if now > due + 1e-6; then now = max(now, ready) + service, using index 0 of time_windows/service_times for the depot;",
+    "the service completion at the LAST customer of every route is <= horizon + 1e-6 (this is the only place the depot's closing time is enforced by the checker);",
+    "the cost reported in the dump equals the recomputed sum of Euclidean leg lengths over all routes, within max(1e-4, 1e-4 * cost)."
+  ],
+  "objective": "Minimize the total travel distance over all routes (sum of Euclidean leg lengths, including every depot departure and return). POMO's reward is its negative, and the pipeline's score is scale / best_cost with scale 1.0, so a lower reported cost is strictly better.",
+  "output_contract": [
+    "stdout, character for character: `the initial process is successful, the initial cost is {cost}`",
+    "stdout, character for character: `the process is successful, the best cost is {cost}`",
+    "`{cost}` must match \\d+(\\.\\d+)? -- print it with a fixed-point format such as f'{cost:.6f}', never with a bare str(float), which can emit `1e-05`, `nan` or `inf` and make the acceptance regex miss.",
+    "`--path` accepts either one instance .json or a directory (then the first *.json in sorted order); `--iteration N` bounds the number of improvement passes; exit code 0.",
+    "`--save-solution <path>` writes {\"routes\": [[0, 3, 7, 0], [0, 5, 0], ...], \"cost\": <float>} -- node ids 1..n with 0 at both ends of every route, and `cost` is the same number that was printed as the best cost.",
+    "run.py must not require a checkpoint: checkpoints/ may be empty (it is the user's drop box). Resolve the highest-epoch checkpoint*.pt under checkpoints/ when present, honour --model-path / MODEL_PATH as an override, skip silently when nothing is found, and still print both lines.",
+    "the dump must be validated before it is printed: the routes that are written are the routes whose cost is printed, and they must pass the feasibility_checklist."
+  ],
+  "pomo_modification_plan": [
+    {
+      "file": "pomo/CVRProblemDef.py",
+      "symbol": "get_random_problems",
+      "change": "keep the argument list (batch_size, problem_size) and extend the return tuple with time_windows (batch, problem_size+1, 2) and service_times (batch, problem_size+1), generated FEASIBLE BY CONSTRUCTION: shuffle the customers, walk them under the capacity rule, record the arrival times that walk induces, set ready = arrival - small margin and due = arrival + window width growing with the arrival -- the same construction the shipped generator uses (instances.py:generate_instance). A sequential loop over the shuffled order on (batch,) tensors is acceptable: ~100 cheap steps against a ~100-step rollout. Random windows drawn independently of the geometry would produce unreachable customers and break both the depot-restart invariant and the training signal.",
+      "why": "CVRPTWEnv.reset needs both tensors, and at training time they come from this generator, not from a file."
+    },
+    {
+      "file": "pomo/CVRProblemDef.py",
+      "symbol": "get_instance_from_json (new function; no POMO counterpart)",
+      "change": "new loader: read one instance json (depot_xy, node_xy, node_demand, capacity, time_windows, service_times), return five (1, ..., ...) float32 tensors with the depot prepended, node_demand divided by the instance's capacity (the environment's normalized convention) and index 0 of time_windows/service_times kept as the depot's own [0, horizon] / 0.0. Nothing about the instance may be hardcoded: the customer count comes from the file, and problem_size is only the tensor width we build for.",
+      "why": "run.py and test_n100.py must consume a runtime instance; POMO only ever generated random ones."
+    },
+    {
+      "file": "pomo/CVRProblemDef.py",
+      "symbol": "augment_xy_data_by_8_fold",
+      "change": "leave this function alone. The windows and service times must NOT be passed through it: they are repeated with node_demand.repeat(8, 1) in load_problems, because all eight transforms are reflections or the transpose, i.e. isometries, so every pairwise distance -- and every window derived from one -- is unchanged.",
+      "why": "the cheapest way to make an augmented instance infeasible is to reflect its time windows along with its coordinates."
+    },
+    {
+      "file": "pomo/POMO/CVRPEnv.py",
+      "symbol": "Reset_State",
+      "change": "add time_windows (batch, n+1, 2) and service_times (batch, n+1), filled in load_problems the way node_demand already is.",
+      "why": "the model needs both to build its decoder features, and reset_state is the only channel pre_forward reads."
+    },
+    {
+      "file": "pomo/POMO/CVRPEnv.py",
+      "symbol": "Step_State",
+      "change": "add current_time (batch, pomo), published in pre_step and updated in step alongside load and ninf_mask.",
+      "why": "the decoder must see the clock, and the mask is computed from it."
+    },
+    {
+      "file": "pomo/POMO/CVRPEnv.py",
+      "symbol": "load_problems",
+      "change": "carry time_windows / service_times through the same path as demand: from the json loader or the random generator, then repeat(8, 1, 1) / repeat(8, 1) when aug_factor == 8. Keep depot_node_xy and depot_node_demand exactly as they are.",
+      "why": "one place owns the batch layout, and every downstream shape follows from it."
+    },
+    {
+      "file": "pomo/POMO/CVRPEnv.py",
+      "symbol": "reset",
+      "change": "self.current_time = torch.zeros(size=(self.batch_size, self.pomo_size)) next to self.load = torch.ones(...).",
+      "why": "the vehicle leaves the depot at time 0 with a full tank; this is also the state the depot-restart argument starts from."
+    },
+    {
+      "file": "pomo/POMO/CVRPEnv.py",
+      "symbol": "step",
+      "change": "fill in the clock and the two new masks, in this order: (1) read the previous node's coordinates into a local BEFORE self.current_node = selected (at the very first step there is no previous node and the selection is the depot, whose clock is 0 anyway); (2) arrival = current_time + dist(previous, selected), gathered per rollout; (3) self.current_time = torch.max(arrival, ready_selected) + service_selected, then self.current_time[self.at_the_depot] = 0; (4) after the existing visited/capacity lines, union in the time-window and horizon flags, force ninf_mask[:, :, 0] = 0, and keep the existing finished reopen as the last statement so it still wins. Do not move the existing load / visited / finished code.",
+      "why": "this is the whole constraint set becoming legal actions, and the ordering inside it is what makes the arrival quantity correct."
+    },
+    {
+      "file": "pomo/POMO/CVRPEnv.py",
+      "symbol": "_get_tw_ninf_flag (new helper, called from the existing CVRPEnv.step)",
+      "change": "new helper, one per new mask rule as the codegen contract requires: return the boolean (batch, pomo, n+1) `arrival > due - TIME_MARGIN`, computed from current_time, current_node coordinates, depot_node_xy and time_windows only, with TIME_MARGIN = 1e-3 stated as a named constant next to the existing round_error_epsilon.",
+      "why": "the revise stage must be able to find each rule, and the margin is the part most likely to be silently changed."
+    },
+    {
+      "file": "pomo/POMO/CVRPEnv.py",
+      "symbol": "_get_horizon_ninf_flag (new helper, called from the existing CVRPEnv.step)",
+      "change": "new helper: return the boolean (batch, pomo, n+1) `torch.max(arrival, ready) + service > horizon - TIME_MARGIN` with horizon = time_windows[:, 0, 1].",
+      "why": "the checker enforces the depot's closing time on the last customer of a route; masking it everywhere makes that violation structurally impossible."
+    },
+    {
+      "file": "pomo/POMO/CVRPEnv.py",
+      "symbol": "pre_step",
+      "change": "publish current_time into step_state (one line, next to the existing load / ninf_mask / finished assignments).",
+      "why": "the model reads the clock from the step state, exactly as it already reads load."
+    },
+    {
+      "file": "pomo/POMO/CVRPModel.py",
+      "symbol": "CVRP_Encoder",
+      "change": "do not touch. embedding_depot stays Linear(2, 128) and embedding_node stays Linear(3, 128); node_xy_demand stays (batch, problem, 3). No time quantity may enter the encoder.",
+      "why": "this is the checkpoint's lifeline: those two weight matrices are (128, 2) and (128, 3) in checkpoint-30500.pt, verified."
+    },
+    {
+      "file": "pomo/POMO/CVRPModel.py",
+      "symbol": "CVRPModel.pre_forward",
+      "change": "keep the encoder call as it is and stash time_windows / service_times from the reset state on self so the decoder features can be gathered per step (horizon = time_windows[:, 0, 1] is the normalizer).",
+      "why": "new information must travel through the decoder context, and pre_forward is where the static tensors arrive."
+    },
+    {
+      "file": "pomo/POMO/CVRPModel.py",
+      "symbol": "CVRP_Decoder.__init__",
+      "change": "widen only the first context layer: self.Wq_last = nn.Linear(embedding_dim+1+2, head_num*qkv_dim, bias=False) -- 129 -> 131 for this task. Everything else (Wk, Wv, multi_head_combine, the single-head key) stays at 128.",
+      "why": "two scalars -- current_time/horizon and (due[current_node] - current_time)/horizon -- are concatenated to the existing (encoded_last_node, load) context. This is the single key that cannot be loaded from checkpoint-30500.pt."
+    },
+    {
+      "file": "pomo/POMO/CVRPModel.py",
+      "symbol": "CVRP_Decoder.forward",
+      "change": "take the two time scalars as an extra argument, concatenate them after load in input_cat, and leave the ninf_mask handling untouched. Both scalars are divided by horizon so they stay O(1) next to load, which is a fraction.",
+      "why": "the policy has to see time to act on it; the mask tells it what is legal, the context tells it what is urgent."
+    },
+    {
+      "file": "pomo/POMO/CVRPModel.py",
+      "symbol": "CVRPModel.forward",
+      "change": "build the two scalars in the third branch only (selected_count >= 2), gathering ready/due at state.current_node; keep the two forced opening moves exactly as they are -- at that point current_node is None and the decoder is not called.",
+      "why": "guards the None-node case and keeps POMO's multi-start design intact."
+    },
+    {
+      "file": "pomo/POMO/CVRPTrainer.py",
+      "symbol": "CVRPTrainer.__init__ / _train_one_batch",
+      "change": "no structural change: the REINFORCE update, the shared POMO baseline and the reward stay as they are, and load_problems now builds the windows itself. Only the device gate changes: USE_CUDA must be false on this machine, because torch is 2.14.1+cpu and torch.set_default_tensor_type('torch.cuda.FloatTensor') raises TypeError here.",
+      "why": "the training loop is not where the variant lives; the environment is."
+    },
+    {
+      "file": "pomo/POMO/CVRPTester.py",
+      "symbol": "_test_one_batch / run (+ one new single-instance entry point for run.py)",
+      "change": "keep the augmentation + reward bookkeeping, and add the one thing run.py cannot reimplement: a single-instance evaluation that returns the best rollout's route sequence, recovered from self.env.selected_node_list (split at 0, drop the leading empty segment and any [0, 0] idle segment) together with its cost. Report the route-shaped best, not just the mean score.",
+      "why": "the acceptance contract needs a solution, while the baseline tester only ever reported average scores."
+    },
+    {
+      "file": "pomo/POMO/train_n100.py",
+      "symbol": "env_params / trainer_params / main",
+      "change": "problem_size 100, pomo_size 100 (already the baseline's own numbers); model_load stays {'enable': False} with path/epoch commented out; logging.log_image_params_1 stays on style_cvrp_20.json (style_cvrp_100.json pins ylim to 10..30, which a from-scratch run leaves immediately); USE_CUDA = torch.cuda.is_available() and not DEBUG_MODE; wrap the copy_all_src(...) call in try/except -- verified on this baseline: under torch 2.14 it walks sys.modules and tries to copy torch's _ops.py and _classes.py, which do not exist on disk, and raises FileNotFoundError.",
+      "why": "the entry point must construct and start on this CPU-only box, and every one of those four points has bitten this project before."
+    },
+    {
+      "file": "pomo/POMO/test_n100.py",
+      "symbol": "tester_params / model_load (values kept; the resolution itself is a new helper, _resolve_model_load, in the entry point)",
+      "change": "problem_size 100, pomo_size 100, test_episodes 10*1000, test_batch_size 1000, aug_factor 8, augmentation_enable True; test_data_load.enable = False (the upstream vrp100_test_seed1234.pt is not in this layout); model_load resolved at run time from the checkpoints/ drop box -- --model-path / MODEL_PATH first, then the highest epoch among checkpoint*.pt parsed out of the file name, never a hardcoded name or epoch; self.model.load_state_dict(..., strict=False) as the tester's own comment suggests. USE_CUDA gated as above.",
+      "why": "the user trains, drops a checkpoint into checkpoints/, and evaluates; nothing in the deliverable may assume which file that is."
+    }
+  ],
+  "run_plan": [
+    "Write CVRPTWProblemDef.py: the random generator extended with feasible-by-construction windows plus the json loader (five tensors, demands divided by the instance's own capacity); the 8-fold augmentation stays coordinate-only.",
+    "Write CVRPTWEnv.py: time_windows / service_times in Reset_State, current_time in Step_State, the clock update inside step (previous-node coordinates read before current_node is overwritten), and the two new mask helpers composed into the single ninf_mask with index 0 forced back to 0.",
+    "Write CVRPTWModel.py: encoder frozen at 2 and 3 input dims; two horizon-normalized scalars concatenated into the decoder context; Wq_last widened 129 -> 131; the two forced opening moves unchanged.",
+    "Write CVRPTWTester.py (single-instance evaluation + route extraction from env.selected_node_list) and CVRPTWTrainer.py, both CPU-gated and otherwise structural copies of the baseline.",
+    "Write train_n100.py / test_n100.py: model_load disabled with path/epoch commented out; test weights resolved from checkpoints/ by highest epoch (with --model-path / MODEL_PATH override); load_state_dict(..., strict=False); style_cvrp_20.json for the objective plot; try/except around copy_all_src.",
+    "Write run.py, the acceptance surface: resolve the baseline by walking up from __file__ to the directory holding pomo/ and put that directory, pomo/ and pomo/POMO/ on sys.path (never a literal '../..'); run one greedy augmented pass and print the initial line; then run the remaining --iteration passes (greedy + sampled rollouts, best kept), validate the best route set against the instance's own semantics before dumping it, print the best line with a fixed-point format, and write {'routes': ..., 'cost': ...} when --save-solution is given.",
+    "Write README.md with the '## Baseline correspondence' table (one row per deliverable), the exact train/test commands, what was implemented versus deferred, and the skipped checkpoint key (decoder.Wq_last.weight).",
+    "Keep one improvement pass at the cost of a single augmented rollout (~1-2 s on CPU), so the grader's --iteration 100 stays far inside its 3600 s budget; measure the per-pass time in the smoke run and say so in the summary.",
+    "Verify in the executor's gate order -- py_compile, import_probe, correspondence, smoke_run, full_run -- and reproduce a single gate with `cvrp stage <name>` instead of re-running the whole pipeline when one of them fails.",
+    "Declare no dependencies and run no installs: torch, numpy, pytz and matplotlib are already installed and pinned by workspace.setup, and the interpreter that runs the deliverable is this project's venv."
+  ],
+  "related_knowledge": {
+    "used": [
+      {
+        "source": "main/skills/cvrptw_skill.md",
+        "applies_because": "the executor's package set is a property of this pipeline, not of the variant or the scale, so it transfers to this n=100 task verbatim.",
+        "action": "run_plan: declare no dependencies and run no installs -- torch, numpy, pytz and matplotlib are already installed and pinned by workspace.setup."
+      },
+      {
+        "source": "main/skills/cvrptw_skill.md",
+        "applies_because": "the five gates and their order (py_compile, import_probe, correspondence, smoke_run, full_run) are the failure model the deliverable is designed against, independent of variant and scale.",
+        "action": "run_plan: verify in the executor's gate order -- py_compile, import_probe, correspondence, smoke_run, full_run -- and design against the known failure of each (import_probe needs the three-entry sys.path bootstrap from run.py's own location; correspondence fixes the file set, the baseline-correspondence first line and the parameter values)."
+      },
+      {
+        "source": "main/skills/cvrptw_skill.md",
+        "applies_because": "reproducing one stage instead of a whole run is a process fact, and it is the difference between one revise round and three when a single gate fails.",
+        "action": "run_plan: reproduce a single gate with `cvrp stage <name>` instead of re-running the pipeline when one of them fails."
+      }
+    ],
+    "rejected": [
+      {
+        "source": "main/notes/cvrptw_notes.md",
+        "reason": "identity-only stub: the problem tag is already in the task description, its 'scale: n=20' is exactly the one fact that does not transfer to this n=100 task, and its Traps section is empty -- there is nothing to act on."
+      },
+      {
+        "source": "main/attempts/cvrptw_attempts.md",
+        "reason": "both entries are llm.backend: mock runs at n=20 that never invoked the real solver (the record says so itself), and its only substantive claim -- that the deterministic gates and the acceptance contract were exercised -- is already carried by the selected skill's verification playbook, which this analysis does use."
+      }
+    ],
+    "note": "Provenance matters here: every record in the knowledge base for this problem was written by llm.backend: mock (offline, n=20), and the selected skill's 'Proven fixes' section is explicitly empty. So nothing solver-specific (masking, time-window handling, timings) is taken from the knowledge base; it is derived from the task description, the staged pomo/ baseline, and measurements on the shipped instances (see measured_invariants). What carries over is toolchain-level only, and each of those three items is a run_plan step above."
+  }
+}

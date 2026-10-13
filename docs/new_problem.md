@@ -1,5 +1,25 @@
 # Adding a new VRP variant
 
+> **Sizes are a task setting, not a problem directory.** A task declares the
+> instance size once:
+>
+> ```yaml
+> scale:
+>   problem_size: 50      # customers; an instance's DIMENSION is this + 1
+>   pomo_size: 50         # optional; defaults to problem_size
+>   aug_factor: 8         # optional; defaults to 8
+> ```
+>
+> and the spec's `{n}`, `{pomo}` and `{aug}` placeholders are substituted with it
+> before anything reads the spec. That is how one `problems/cvrptw/` serves n=20,
+> n=50 and n=100 — see `task.yaml`, `task_n50.yaml`, `task_n100.yaml`. A problem
+> that wants to be size-parameterised writes those placeholders where the size
+> belongs (entry-point file names, `data.sizes`, `data.instance_glob`,
+> `generated.dimensions`) and reads the size from the spec in its generator
+> instead of hardcoding it. A problem that is inherently one size can ignore the
+> placeholders entirely; nothing breaks, because a task without a `scale` block
+> renders `{n}` as 20.
+
 The engine is variant-agnostic. A variant is a directory under `problems/<slug>/`,
 and `task.yaml:problem.slug` selects it. Nothing under `src/cvrp/{pipeline,
 executor,web}` mentions a variant by name — if you find yourself editing those to

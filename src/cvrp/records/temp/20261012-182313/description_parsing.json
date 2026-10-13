@@ -1,0 +1,15 @@
+{
+  "record": "description_parsing",
+  "run_id": "20261012-182313",
+  "written_at": "2026-10-12T10:23:13Z",
+  "stage": "retrieval",
+  "ok": true,
+  "duration_s": 0.008,
+  "notes": [],
+  "payload": {
+    "mock": true,
+    "stage": "unknown"
+  },
+  "agent_error": "",
+  "gate": "retrieval: FAILED - artifacts/records/retrieval.json missing"
+}

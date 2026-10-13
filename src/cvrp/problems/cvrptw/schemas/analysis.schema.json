@@ -101,6 +101,42 @@
       "type": "array",
       "items": { "type": "string" }
     },
+    "related_knowledge": {
+      "type": "object",
+      "description": "Optional. How the records the retrieval stage handed over were consulted. This is reference material, not a contract: nothing here is validated against the plan, and omitting the block entirely is allowed.",
+      "properties": {
+        "used": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "source": { "type": "string" },
+              "applies_because": { "type": "string" },
+              "influence": {
+                "type": "string",
+                "description": "What this record changed. Free text; it does not have to match any plan wording."
+              },
+              "action": {
+                "type": "string",
+                "description": "Deprecated alias of `influence`, accepted for compatibility."
+              }
+            }
+          }
+        },
+        "rejected": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["source", "reason"],
+            "properties": {
+              "source": { "type": "string" },
+              "reason": { "type": "string", "minLength": 3 }
+            }
+          }
+        },
+        "note": { "type": "string" }
+      }
+    },
     "open_questions": {
       "type": "array",
       "items": { "type": "string" }

@@ -33,7 +33,15 @@ DEFAULT_UI_PORT = 8420
 #: argument parser does not import the orchestrator (and through it the LLM
 #: backends) just to print `--help`. `cvrp stage` validates against the
 #: authoritative list in `cvrp.pipeline.orchestrator.REPLAYABLE_STAGES`.
-STAGE_CHOICES = ("analysis", "code_generation", "code_error", "code_revise", "feasibility")
+STAGE_CHOICES = (
+    "retrieval",
+    "analysis",
+    "code_generation",
+    "code_error",
+    "code_revise",
+    "feasibility",
+    "update",
+)
 
 
 # --------------------------------------------------------------------------- #

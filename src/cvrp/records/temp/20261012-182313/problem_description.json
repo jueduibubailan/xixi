@@ -1,0 +1,19 @@
+{
+  "record": "problem_description",
+  "run_id": "20261012-182313",
+  "written_at": "2026-10-12T10:23:13Z",
+  "task": {
+    "name": "CVRPTW-on-POMO",
+    "slug": "cvrptw"
+  },
+  "problem": {
+    "slug": "cvrptw",
+    "tag": "CVRPTW"
+  },
+  "scale": {
+    "problem_size": 20,
+    "pomo_size": 20
+  },
+  "description": "Synthesize a new POMO-based solver for the **Capacitated Vehicle Routing\nProblem with Time Windows (CVRPTW)**, by *modifying the input, state and\nmasking* of the existing POMO CVRP implementation -- not by rewriting its\nneural backbone.\n\nThe seed code (the `pomo/` baseline staged into your worktree) solves plain\nCVRP: it samples coordinates and demands, then rolls out POMO's RNN\nencoder-decoder with a `visited` mask and a capacity mask. CVRPTW adds a\nconstraint on *when* each customer may be served, which forces:\n\n  1. two new per-instance tensors: `time_windows` (n+1, 2) and\n     `service_times` (n+1,);\n  2. one new per-step dynamic state: `current_time` (batch, pomo);\n  3. a new masking layer: a customer is masked when it is already visited,\n     when serving it would exceed capacity, or when it cannot be served\n     inside its time window given the arrival time;\n  4. a replacement of the capacity-only masking rule with a rule that also\n     carries a \"return-to-depot is always allowed for feasibility\" exception.\n\nThe checkpoint becomes available in your worktree as the path named by\n`problem.yaml:resources.checkpoint`. It was trained by POMO on CVRP100, and\nthe synthesized solver must keep it loadable: the encoder's input dimension\nstays unchanged, and any new information enters the decoder as an additional\nconcatenated feature.\n",
+  "tips": "- Time is defined by Euclidean distance (travel time == distance). Do NOT\n  introduce a vehicle speed.\n- Customers may be served at or after their window opens; arriving early is\n  allowed and the vehicle waits. Arriving after the window closes is infeasible.\n- A vehicle may always return to the depot; returning early simply starts a\n  new route, and it costs the depot round trip.\n- Service times accumulate onto the current time. Waiting accumulates too.\n- The acceptance contract of the whole pipeline is textual: the generated\n  program must print both lines listed under `program.expected_lines` in\n  `problems/cvrptw/problem.yaml`, on stdout.\n- Instances are synthesized locally (n=20). Nobody supplies a dataset.\n"
+}

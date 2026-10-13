@@ -6,7 +6,7 @@ from logging import getLogger
 from CVRPEnv import CVRPEnv as Env
 from CVRPModel import CVRPModel as Model
 
-from CVRP.POMO.utils.utils import *
+from pomo.POMO.utils.utils import *
 
 
 class CVRPTester:

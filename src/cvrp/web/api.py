@@ -23,11 +23,20 @@ MAX_TEXT_BYTES = 400_000
 
 # artifact locations, used by /api/stages to attach statuses
 STAGE_ARTIFACTS = {
+    "retrieval": [
+        "artifacts/records/retrieval.json",
+        "artifacts/records/description_parsing.json",
+    ],
     "analysis": ["artifacts/analysis/analysis.json", "artifacts/analysis/plan.md"],
     "code_generation": ["artifacts/generated"],
-    "code_error": ["artifacts/runs/s3_run_report.json", "artifacts/runs/s3_full_run.stdout.txt"],
+    "code_error": [
+        "artifacts/runs/s3_run_report.json",
+        "artifacts/runs/s3_full_run.stdout.txt",
+        "artifacts/runs/s3_error_narrative.json",
+    ],
     "code_revise": ["artifacts/revisions"],
     "feasibility": ["artifacts/runs/s5_feasibility.json"],
+    "update": ["records/main"],
 }
 
 
@@ -206,6 +215,162 @@ async def get_file(request: Request) -> Response:
     except OSError as exc:
         return _json({"error": str(exc)}, status=500)
     return _json({"path": relative, "text": text})
+
+
+async def get_records(request: Request) -> Response:
+    """The knowledge base, plus this run's own record buckets.
+
+    Two sources, deliberately. `records/main/` lives in the *project*, not in the run --
+    it is what the next project reads -- so it is listed here even when the dashboard is
+    pointed at a run that predates it, and a fresh checkout with no runs still shows a
+    knowledge base if one exists. `temp/` and `related/` are per-run and come from the run
+    directory, where `safe_path` already applies.
+
+    `from_this_run` is the answer to "what did *this* run contribute?": the update stage's
+    merge appends into shared files, so without it a reader cannot tell a file this run
+    wrote from one an earlier run left behind.
+    """
+    context: RunContext = request.app.state.context
+    config = context.config
+
+    from cvrp.records import knowledge_inventory, main_dir, records_root, tag_of
+
+    main_root = main_dir(config)
+    payload: dict[str, Any] = {
+        "records_dir": str(records_root(config)),
+        "main_dir": str(main_root),
+        "main": [],
+        "run": [],
+        "areas": {},
+        "problem": tag_of(config.get("_problem")),
+    }
+
+    try:
+        inventory = knowledge_inventory(config, config.get("_problem"))
+    except Exception as exc:  # noqa: BLE001 - the dashboard must never 500 on this
+        inventory = []
+        payload["error"] = f"could not read the knowledge base: {exc}"
+
+    run_dir = context.resolve(request.query_params.get("run"))
+    contributed: set[str] = set()
+    if run_dir is not None:
+        index = read_json(main_root / "index.json", default={}) or {}
+        for entry in index.get("runs") or []:
+            if str(entry.get("run_id")) == run_dir.name:
+                contributed = {str(name) for name in (entry.get("files") or [])}
+
+    for item in inventory:
+        area = str(item.get("area") or "")
+        raw = str(item.get("path") or "")
+        # Only the knowledge base proper, as decided: `main/<area>/<name>`. The records
+        # root also holds `index.json` (which attributes files to runs) and the per-run
+        # areas, and listing them here would blur what the panel is showing.
+        if not raw.startswith("main/") or raw == "main/index.json":
+            continue
+        relative = raw[len("main/") :]
+        payload["areas"][area] = payload["areas"].get(area, 0) + 1
+        payload["main"].append(
+            {
+                "path": item.get("path"),
+                "area": area,
+                "bytes": item.get("bytes"),
+                "headings": item.get("headings") or [],
+                "from_this_run": bool(relative and relative in contributed),
+            }
+        )
+
+    if run_dir is not None:
+        # `temp/` and `related/` are run-scoped by directory name, not nested in the run:
+        # the records layer owns them under the project's records root. The run directory
+        # keeps only the copy the stages produced (`records/main`), so it is the fallback
+        # source rather than the primary one.
+        from cvrp.records import related_dir, temp_dir
+
+        sources = (
+            ("temp", temp_dir(config, run_dir.name)),
+            ("related", related_dir(config, run_dir.name)),
+            # What the retrieval stage wrote inside the run: the excerpts analysis read.
+            # `retrieval.json` itself is skipped here because `related/` already lists it.
+            ("retrieval", run_dir / "artifacts" / "records"),
+        )
+        for bucket, folder in sources:
+            if not folder.is_dir() and bucket != "retrieval":
+                folder = run_dir / "records" / bucket
+            if not folder.is_dir():
+                continue
+            for path in sorted(folder.rglob("*")):
+                if not path.is_file():
+                    continue
+                if bucket == "retrieval" and path.name == "retrieval.json":
+                    continue
+                try:
+                    size = path.stat().st_size
+                except OSError:
+                    continue
+                # The bucket is known from the tab and the run from the query, so the
+                # listed path is the bare file name -- which is exactly what
+                # `origin=run` expects to be joined onto `temp/<run_id>`.
+                payload["run"].append({"bucket": bucket, "path": path.name, "bytes": size})
+    return _json(payload)
+
+
+async def get_record_file(request: Request) -> Response:
+    """Serve one file from the knowledge base.
+
+    `safe_path` is deliberately *not* reused: it confines callers to the run directory,
+    and this endpoint exists precisely to reach outside it. The confinement here is its
+    own: resolve, then require the result to stay under **`records/main/`** -- the
+    knowledge base proper, which is also all the panel is willing to list. Only markdown
+    and JSON are served, because those are the only things the update stage may write.
+
+    Paths are accepted with or without the `main/` prefix, since the listing reports
+    `main/<area>/<name>` while a caller may reasonably send just `<area>/<name>`.
+
+    `origin=run` switches the confined root to this run's `records/temp/<run_id>` and
+    `records/related/<run_id>` directories, which is where the per-run evidence lives --
+    same idea, different root, and still no path outside the named root is served.
+    """
+    context: RunContext = request.app.state.context
+    requested = (request.query_params.get("path") or "").replace("\\", "/").lstrip("/")
+    relative = requested[len("main/") :] if requested.startswith("main/") else requested
+    if not relative or Path(relative).suffix.lower() not in {".md", ".json"}:
+        return _json({"error": f"not a readable record: {requested!r}"}, status=404)
+
+    from cvrp.records import main_dir, related_dir, temp_dir
+
+    if (request.query_params.get("origin") or "main") == "run":
+        run_dir = context.resolve(request.query_params.get("run"))
+        if run_dir is None:
+            return _json({"error": "no run"}, status=404)
+        roots = [
+            temp_dir(context.config, run_dir.name),
+            related_dir(context.config, run_dir.name),
+            run_dir / "artifacts" / "records",
+        ]
+        if not any(root.is_dir() for root in roots):
+            roots = [run_dir / "records" / "temp", run_dir / "records" / "related"]
+    else:
+        roots = [main_dir(context.config)]
+
+    for root in roots:
+        root = root.resolve()
+        candidate = (root / relative).resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError:
+            continue
+        if candidate.is_file():
+            size = candidate.stat().st_size
+            if size > MAX_TEXT_BYTES:
+                return _json(
+                    {"error": "file too large to display", "size": size}, status=413
+                )
+            try:
+                text = candidate.read_text(encoding="utf-8", errors="replace")
+            except OSError as exc:
+                return _json({"error": str(exc)}, status=500)
+            return _json({"path": requested, "text": text})
+    return _json({"error": f"not a file: {relative}"}, status=404)
 
 
 async def get_logs(request: Request) -> Response:

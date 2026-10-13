@@ -63,7 +63,7 @@ stages:
     kind: executor
     role: "src/cvrp/roles/code_error_agent.md"
     produces: ["artifacts/runs/s3_run_report.json"]
-    steps: [py_compile, smoke_run, full_run]
+    steps: [py_compile, import_probe, smoke_run, full_run]
   - name: code_revise
     kind: agent
     role: "src/cvrp/roles/code_revise_agent.md"

@@ -8,6 +8,7 @@ without any knowledge of prompts or LLMs.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,11 @@ from typing import Any
 from cvrp.run.worktree import changed_since_snapshot, untouched_outputs
 
 ANALYSIS_REL = "artifacts/analysis/analysis.json"
+#: What the retrieval stage must leave behind (run-relative).
+RETRIEVAL_REL = "artifacts/records/retrieval.json"
+#: What the update stage must leave behind. It writes a directory, so the gate checks
+#: the directory rather than one path.
+UPDATE_REL = "records/main"
 
 # Fields an analysis payload must have for downstream stages to be able to work.
 REQUIRED_ANALYSIS_FIELDS = (
@@ -180,6 +186,177 @@ def describe_artifact(path: Path) -> str:
     return "missing"
 
 
+def _advise_related_knowledge(analysis: dict[str, Any], warnings: list[str]) -> None:
+    """Comment on `related_knowledge` without ever failing on it.
+
+    The retrieval stage hands the analysis a selection of the knowledge base, and that
+    selection is *reference material*: it shapes wording, ordering, trade-offs and which
+    traps get avoided. A first version of this gate required every `used` entry to be
+    findable in `run_plan` as literal text -- and killed a complete, schema-valid analysis
+    because the agent wrote `run_plan: declare no dependencies and run no installs` where
+    the plan said `Declare no dependencies and run no installs:`. One colon. The turn cost
+    460 seconds and it was thrown away.
+
+    That is the lesson: a gate may check that something was *said*, never that it was said
+    in the expected words. Knowledge can legitimately change a decision without adding a
+    plan item, so "did the knowledge reach the plan?" is not even the right question.
+
+    What remains is visibility, not enforcement. A missing or thin block becomes a warning
+    that the report shows and a human can act on; a run is never failed for it.
+    """
+    block = analysis.get("related_knowledge")
+    if block is None:
+        return
+    if not isinstance(block, dict):
+        warnings.append("analysis.related_knowledge is not an object; it is ignored")
+        return
+
+    used = block.get("used")
+    if used is not None and not isinstance(used, list):
+        warnings.append("analysis.related_knowledge.used is not a list; it is ignored")
+        used = None
+    if isinstance(used, list):
+        for index, item in enumerate(used):
+            if not isinstance(item, dict):
+                warnings.append(f"related_knowledge.used[{index}] is not an object")
+                continue
+            if not str(item.get("source") or "").strip():
+                warnings.append(
+                    f"related_knowledge.used[{index}] names no `source`, so the claim cannot "
+                    "be traced back to a record"
+                )
+            if not str(item.get("influence") or item.get("action") or "").strip():
+                warnings.append(
+                    f"related_knowledge.used[{index}] names no `influence`: say what the "
+                    "record changed, or move it to `rejected`"
+                )
+
+    rejected = block.get("rejected")
+    if isinstance(rejected, list):
+        for index, item in enumerate(rejected):
+            if not isinstance(item, dict):
+                warnings.append(f"related_knowledge.rejected[{index}] is not an object")
+                continue
+            if not str(item.get("reason") or "").strip():
+                warnings.append(
+                    f"related_knowledge.rejected[{index}] gives no `reason`; say why the "
+                    "record does not apply"
+                )
+
+    sources_used = {
+        str(item.get("source") or "")
+        for item in (used or [])
+        if isinstance(item, dict)
+    }
+    for item in rejected or []:
+        if isinstance(item, dict) and str(item.get("source") or "") in sources_used:
+            warnings.append(
+                f"related_knowledge lists {item.get('source')!r} as both used and rejected"
+            )
+
+
+def _warn_if_oversized(analysis: dict[str, Any], warnings: list[str]) -> None:
+    """Flag an analysis payload that has grown past usefulness.
+
+    The contract is a plan, not an essay: a real n=100 payload came in at 38 KB, most of it
+    prose restating the task description. Downstream stages read this file, so size is a
+    cost paid twice (context and attention). This is a warning, never a failure -- the
+    content may be excellent, and nobody should lose a run to a byte count.
+    """
+    import json as _json
+
+    try:
+        size = len(_json.dumps(analysis, ensure_ascii=False).encode("utf-8"))
+    except (TypeError, ValueError):
+        return
+    if size > 100_000:
+        warnings.append(
+            f"analysis payload is {size // 1024} KB; consider trimming prose that repeats "
+            "the task description -- downstream stages read this file too"
+        )
+
+
+def _normalise_text(text: str) -> str:
+    return re.sub(r"\s+", " ", str(text)).strip().lower()
+
+
+def gate_retrieval(
+    run_dir: Path,
+    worktree: Path | None = None,
+    baseline: dict[str, str] | None = None,
+) -> GateResult:
+    """The retrieval stage must leave behind a *stated* result, produced by this attempt.
+
+    Two outcomes, both fine, and only one thing is ever wrong: a silence.
+
+    * found something -> `selected` is non-empty and each entry says why it was picked;
+    * found nothing   -> `{"empty": true, "note": ...}`.
+
+    This stage never decides whether the run continues: an empty knowledge base is the
+    normal state of a new problem, and the pipeline proceeds to analysis either way. The
+    gate exists so that "I looked and there was nothing" is recorded as a fact rather than
+    being indistinguishable from "the stage wrote no output".
+    """
+    issues: list[str] = []
+    require_produced(worktree, [RETRIEVAL_REL], baseline, issues, describe=describe_artifact)
+
+    payload = None
+    for base in _artifact_roots(run_dir, worktree):
+        candidate = base / RETRIEVAL_REL
+        if candidate.is_file():
+            try:
+                payload = json.loads(candidate.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                issues.append(f"{RETRIEVAL_REL} is not valid JSON")
+                payload = None
+            break
+    if payload is None:
+        if not issues:
+            issues.append(f"{RETRIEVAL_REL} missing")
+        return GateResult("retrieval", False, issues)
+
+    if payload.get("empty"):
+        if not str(payload.get("note") or "").strip():
+            issues.append(
+                "retrieval reported an empty knowledge base without a `note`; saying that "
+                "there was nothing to reuse is fine, leaving it silent is not"
+            )
+    else:
+        selected = payload.get("selected")
+        if not isinstance(selected, list) or not selected:
+            issues.append(
+                "retrieval.selected is empty, but the knowledge base is not: list what you "
+                "selected (or set \"empty\": true if there genuinely was nothing relevant)"
+            )
+        else:
+            for index, item in enumerate(selected):
+                if not isinstance(item, dict):
+                    issues.append(f"selected[{index}] is not an object")
+                    continue
+                if not str(item.get("source") or "").strip():
+                    issues.append(f"selected[{index}] has no `source`")
+    return GateResult("retrieval", not issues, issues)
+
+
+def gate_update(
+    run_dir: Path,
+    worktree: Path | None = None,
+    baseline: dict[str, str] | None = None,
+) -> GateResult:
+    """The update stage must leave at least one non-empty knowledge file behind."""
+    issues: list[str] = []
+    require_produced(worktree, [UPDATE_REL], baseline, issues, describe=describe_artifact)
+    if worktree is not None:
+        root = Path(worktree) / "records" / "main"
+        files = sorted(root.rglob("*.md")) if root.is_dir() else []
+        non_empty = [path for path in files if path.stat().st_size > 0]
+        if not files:
+            issues.append(f"no knowledge files under {root}")
+        elif not non_empty:
+            issues.append(f"every knowledge file under {root} is empty")
+    return GateResult("update", not issues, issues)
+
+
 def read_analysis(run_dir: Path, worktree: Path | None = None) -> dict[str, Any] | None:
     for base in _artifact_roots(run_dir, worktree):
         path = base / ANALYSIS_REL
@@ -209,6 +386,11 @@ def gate_analysis(
         value = analysis.get(field_name)
         if value in (None, "", [], {}):
             issues.append(f"analysis.{field_name} is empty")
+
+    # Advisory only: the retrieved records are reference material for this stage, so how
+    # (or whether) the analysis accounts for them never decides the gate.
+    _advise_related_knowledge(analysis, warnings)
+    _warn_if_oversized(analysis, warnings)
 
     rules = analysis.get("masking_rules") or []
     if isinstance(rules, list):

@@ -145,7 +145,7 @@ def attach_problem(config: dict[str, Any]) -> dict[str, Any]:
       *serialized* config (``config.resolved.json``) still describes the CLI and
       the acceptance contract without the plugin on disk.
     """
-    from cvrp.problems import ProblemError, find_problem_dir, load_problem
+    from cvrp.problems import ProblemError, find_problem_dir, load_problem, scale_from_config
 
     # Only the keys the *task* set are the user's overrides; anything the plugin
     # spec carries (prompt paths, resource paths, per-variant data parameters)
@@ -163,10 +163,19 @@ def attach_problem(config: dict[str, Any]) -> dict[str, Any]:
     lookup = dict(config)
     lookup["problem"] = user_overrides
     try:
+        scale = scale_from_config(config)
         root = find_problem_dir(slug, lookup)
-        plugin = load_problem(root, slug=slug)
+        plugin = load_problem(root, slug=slug, scale=scale)
     except ProblemError as exc:
         raise ConfigError(str(exc)) from exc
+    # The resolved scale is what every later stage derives from: the data
+    # generator's sizes, the generated file names, the dimensions the code
+    # generation agent is told about, and the executor's instance selection.
+    config["scale"] = {
+        "problem_size": scale.problem_size,
+        "pomo_size": scale.effective_pomo_size,
+        "aug_factor": scale.aug_factor,
+    }
 
     # `problem` = the task's own keys + resolved paths. The plugin's full spec
     # stays on the live object, which is the only thing the engine reads.
@@ -174,6 +183,7 @@ def attach_problem(config: dict[str, Any]) -> dict[str, Any]:
     merged["slug"] = slug
     merged["dir"] = str(plugin.root)
     merged["name"] = plugin.name
+    merged["size"] = scale.problem_size
     merged["_spec_program"] = {
         **{k: v for k, v in (plugin.spec.get("program") or {}).items()},
         "program_relpath": plugin.program_relpath,
@@ -197,6 +207,9 @@ def attach_problem(config: dict[str, Any]) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 
 DEFAULT_STAGES: list[dict[str, Any]] = [
+    # Retrieval first: it is the only stage that reads the cross-run knowledge base, and
+    # what it selects is what analysis gets to act on.
+    {"name": "retrieval", "kind": "agent", "produces": ["artifacts/records/retrieval.json"]},
     {"name": "analysis", "kind": "agent", "produces": ["artifacts/analysis/analysis.json"]},
     {
         "name": "code_generation",
@@ -214,6 +227,9 @@ DEFAULT_STAGES: list[dict[str, Any]] = [
         "kind": "executor",
         "produces": ["artifacts/runs/s5_feasibility.json"],
     },
+    # Last: the knowledge base is only written once the verdict is known, so a failed run
+    # cannot record its lessons as if they had worked.
+    {"name": "update", "kind": "agent", "produces": ["records/main"]},
 ]
 
 
@@ -246,6 +262,27 @@ def validate_config(config: dict[str, Any]) -> None:
     task = config["task"]
     if not isinstance(task, dict) or not task.get("name"):
         raise ConfigError("task.name is required")
+
+    # `scale` was validated while loading the problem (that is what renders the
+    # spec); here we only re-check the resolved result is coherent.
+    scale = config.get("scale")
+    if scale is not None:
+        if not isinstance(scale, dict):
+            raise ConfigError("scale must be a mapping")
+        size = scale.get("problem_size")
+        if not isinstance(size, int) or size < 1:
+            raise ConfigError(f"scale.problem_size must be a positive integer, got {size!r}")
+        pomo = scale.get("pomo_size")
+        if pomo is None:
+            # `scale.pomo_size` is optional: it defaults to the problem size.
+            pomo = size
+            scale["pomo_size"] = size
+        if not isinstance(pomo, int) or pomo < 1:
+            raise ConfigError(f"scale.pomo_size must be a positive integer, got {pomo!r}")
+        if pomo > size:
+            raise ConfigError(
+                f"scale.pomo_size ({pomo}) cannot exceed scale.problem_size ({size})"
+            )
 
 
 def task_slug(config: dict[str, Any]) -> str:

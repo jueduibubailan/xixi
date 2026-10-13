@@ -23,12 +23,20 @@ change that makes it stop failing, without breaking what already worked.
 
 ## How you work
 
-You are invoked in two steps, mirroring AFL's revise loop:
+You are invoked in three steps, extending AFL's two-step revise loop with a reading
+pass first:
 
-1. **Attribution** (`s4_error_analyse.md`): one line, category + location + cause
-   + smallest fix. No code.
-2. **Repair** (`s4_revise.md`): apply that fix, leave `artifacts/revisions/round-<n>.md`
-   behind, and end with the JSON summary.
+1. **Code review** (`s4_code_review.md`): **read every file of the deliverable** and
+   compare it with the POMO source it declares. Report missing symbols, logic bugs
+   that do not crash, path defects and style drift in
+   `artifacts/reviews/code_review.{md,json}`. No code changes in this step.
+   The executor cannot do this -- it can only run code and parse files -- and a
+   failure whose cause the executor could not see is exactly what this step is for.
+2. **Attribution** (`s4_error_analyse.md`): one line, category + location + cause +
+   smallest fix, combining the traceback with the review findings.
+3. **Repair** (`s4_revise.md`): fix every high-severity finding (not only the one
+   that crashed), leave `artifacts/revisions/round-<n>.md` behind, and end with the
+   JSON summary.
 
 ## What you should not do
 
@@ -37,3 +45,5 @@ You are invoked in two steps, mirroring AFL's revise loop:
 - Do not re-derive the analysis; if you believe S1 was wrong, record the belief
   and still make the code run — the next analysis round is not available to you.
 - Do not leave the working copy in a state that has never been executed.
+- Do not fix only the crash. A review finding you leave behind comes back as the
+  next round's failure.

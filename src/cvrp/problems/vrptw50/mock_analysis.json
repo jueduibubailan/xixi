@@ -1,0 +1,133 @@
+{
+  "problem_type": "CVRPTW",
+  "full_name": "Capacitated Vehicle Routing Problem with Time Windows",
+  "summary": "Capacity plus time windows. Travel time equals Euclidean distance with no vehicle speed; a vehicle may arrive early and wait, but must not arrive after a customer's due time. The depot may always be returned to, which is what keeps the rollout from deadlocking.",
+  "constraints": [
+    {"id": "C", "name": "Capacity", "rule": "the served load of a route must never exceed the vehicle capacity"},
+    {"id": "TW", "name": "Time Windows", "rule": "the arrival time at a customer must be <= due; arriving before ready is legal and the vehicle waits"},
+    {"id": "V", "name": "Visit", "rule": "every customer is served exactly once"},
+    {"id": "D", "name": "Depot", "rule": "every route starts and ends at the depot (node 0)"}
+  ],
+  "state_variables": [
+    {
+      "name": "current_time",
+      "shape": "(batch, pomo)",
+      "dtype": "float32",
+      "update": "current_time = max(arrival, ready) + service_time; reset to 0 when a route returns to the depot",
+      "reason": "time-window feasibility depends on when the vehicle can start service, not only on distance"
+    },
+    {
+      "name": "time_windows",
+      "shape": "(batch, n+1, 2)",
+      "dtype": "float32",
+      "update": "static, loaded from the instance",
+      "reason": "the [ready, due] pair of every node; index 0 is the depot with window [0, horizon]"
+    },
+    {
+      "name": "service_times",
+      "shape": "(batch, n+1)",
+      "dtype": "float32",
+      "update": "static, loaded from the instance",
+      "reason": "service at a customer consumes time before the next leg"
+    }
+  ],
+  "masking_rules": [
+    {
+      "name": "visited_mask",
+      "condition": "the customer has already been served",
+      "tensor": "visited_ninf_flag",
+      "shape": "(batch, pomo, n+1)",
+      "exception": "index 0 (depot) is never masked"
+    },
+    {
+      "name": "capacity_mask",
+      "condition": "load + demand[node] > capacity",
+      "tensor": "ninf_mask",
+      "shape": "(batch, pomo, n+1)",
+      "exception": "index 0 (depot) is never masked"
+    },
+    {
+      "name": "time_window_mask",
+      "condition": "current_time + dist(current_node, node) > due[node]",
+      "tensor": "tw_ninf_flag",
+      "shape": "(batch, pomo, n+1)",
+      "exception": "index 0 (depot) is never masked"
+    },
+    {
+      "name": "depot_always_allowed",
+      "condition": "returning to the depot is legal in every state; it ends the current route",
+      "tensor": "ninf_mask[:, :, 0]",
+      "shape": "(batch, pomo)",
+      "exception": "this rule exists so that a customer whose window has closed can never make the state unsolvable"
+    },
+    {
+      "name": "finished_mask",
+      "condition": "all customers have been served; only the depot remains selectable",
+      "tensor": "ninf_mask",
+      "shape": "(batch, pomo, n+1)",
+      "exception": "drives termination rather than feasibility"
+    }
+  ],
+  "feasibility_checklist": [
+    "every customer id 1..n appears exactly once across all routes",
+    "each route starts and ends at node 0",
+    "no route load exceeds the instance capacity",
+    "arrival at each customer is <= its due time, with early arrival allowed to wait",
+    "the reported cost equals the recomputed sum of Euclidean leg lengths"
+  ],
+  "objective": "minimize total travel distance",
+  "output_contract": [
+    "the initial process is successful, the initial cost is {cost}",
+    "the process is successful, the best cost is {cost}"
+  ],
+  "pomo_modification_plan": [
+    {
+      "file": "pomo/CVRProblemDef.py",
+      "symbol": "get_random_problems",
+      "change": "add an instance loader plus time-window and service-time generation for random training instances",
+      "why": "the environment needs these tensors at reset time"
+    },
+    {
+      "file": "pomo/POMO/CVRPEnv.py",
+      "symbol": "CVRPEnv.load_problems",
+      "change": "accept time_windows and service_times and store them alongside depot_node_xy",
+      "why": "everything downstream reads them from the environment"
+    },
+    {
+      "file": "pomo/POMO/CVRPEnv.py",
+      "symbol": "CVRPEnv._get_logit_mask",
+      "change": "add the time-window mask and keep the depot unmasked",
+      "why": "this is where constraints become legal actions"
+    },
+    {
+      "file": "pomo/POMO/CVRPEnv.py",
+      "symbol": "CVRPEnv.step",
+      "change": "advance current_time and reset it on depot returns",
+      "why": "the next mask depends on the updated time"
+    },
+    {
+      "file": "pomo/POMO/CVRPModel.py",
+      "symbol": "CVRPModel.pre_forward",
+      "change": "concatenate current_time and window slack into the decoder context",
+      "why": "the policy must see time to act on it, and the encoder input must not change"
+    }
+  ],
+  "checkpoint_compatibility": {
+    "checkpoint": "checkpoints/checkpoint-30500.pt",
+    "encoder_input_dim_must_stay": 2,
+    "strategy": "load_state_dict(strict=False) + report skipped keys",
+    "risk": "feeding time features into the encoder changes its input width and makes every encoder weight unloadable"
+  },
+  "run_plan": [
+    "write CVRPTWProblemDef.py with a json loader and random instance generation including time windows",
+    "write CVRPTWEnv.py with the new state and the three mask helpers plus the depot exception",
+    "write CVRPTWModel.py reusing the encoder unchanged and widening only the context layer",
+    "write CVRPTWTrainer.py and CVRPTWTester.py following the baseline REINFORCE and rollout structure",
+    "write train_n20.py and test_n20.py entry points",
+    "write run.py that prints the two contract lines and dumps the best solution",
+    "compile, smoke-run with a small iteration budget, then run the full budget"
+  ],
+  "open_questions": [
+    "whether the baseline checkpoint's decoder context width must change, which would leave exactly one layer randomly initialised"
+  ]
+}

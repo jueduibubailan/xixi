@@ -1,0 +1,38 @@
+{
+  "problem": "cvrptw",
+  "runs": [
+    {
+      "run_id": "20261012-201536",
+      "outcome": "completed",
+      "at": "2026-10-12T12:15:37Z",
+      "files": [
+        "skills/cvrptw_skill.md",
+        "notes/cvrptw_notes.md",
+        "attempts/cvrptw_attempts.md"
+      ]
+    },
+    {
+      "run_id": "20261012-201537",
+      "outcome": "completed",
+      "at": "2026-10-12T12:15:39Z",
+      "files": [
+        "skills/cvrptw_skill.md",
+        "notes/cvrptw_notes.md",
+        "attempts/cvrptw_attempts.md"
+      ]
+    },
+    {
+      "run_id": "manual-20261012-crash-n100",
+      "outcome": "FAILED",
+      "at": "2026-10-12T15:23:23Z",
+      "files": [
+        "skills/cvrptw_skill.md",
+        "notes/cvrptw_notes.md",
+        "attempts/cvrptw_attempts.md"
+      ],
+      "source": "manual",
+      "note": "written by hand: the generated train_n100.py crashed on the user's machine, so no pipeline run exists to promote. See the attempts block for the traceback."
+    }
+  ],
+  "updated_at": "2026-10-12T15:23:23Z"
+}

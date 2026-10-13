@@ -36,6 +36,11 @@ GOOD_ANALYSIS = {
     "objective": "minimize distance",
     "output_contract": ["a", "b"],
     "pomo_modification_plan": [{"file": "pomo/POMO/CVRPEnv.py", "change": "add mask"}],
+    "related_knowledge": {
+        "used": [],
+        "rejected": [],
+        "note": "fixture: the knowledge base is empty in this test",
+    },
     "checkpoint_compatibility": {"encoder_input_dim_must_stay": 2},
 }
 

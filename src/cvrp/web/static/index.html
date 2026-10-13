@@ -35,8 +35,14 @@
     <ol class="stages" id="stages"></ol>
   </section>
 
-  <section class="card">
-    <h2>Artifacts</h2>
+  <section class="card" id="browser">
+    <h2>Files</h2>
+    <div class="tabs" id="tabs">
+      <button class="tab active" data-tab="artifacts" type="button">Artifacts</button>
+      <button class="tab" data-tab="records" type="button">Knowledge base <span class="count" id="count-records">·</span></button>
+      <button class="tab" data-tab="run-records" type="button">This run <span class="count" id="count-run-records">·</span></button>
+    </div>
+    <div class="records-head" id="records-head"></div>
     <div class="file-grid">
       <ul class="files" id="files"></ul>
       <div class="viewer">
@@ -64,9 +70,11 @@
     <div class="steer">
       <select id="steer-stage">
         <option value="">any stage</option>
+        <option value="retrieval">retrieval</option>
         <option value="analysis">analysis</option>
         <option value="code_generation">code_generation</option>
         <option value="code_revise">code_revise</option>
+        <option value="update">update</option>
       </select>
       <input id="steer-text" placeholder="e.g. keep the encoder input dim at 2; load the checkpoint with strict=False" />
       <button id="steer-btn" type="button">queue</button>
@@ -74,7 +82,7 @@
   </section>
 </main>
 
-<footer>cvrp · analysis → code generation → error → revise → feasibility</footer>
+<footer>cvrp · retrieval → analysis → code generation → error → revise → feasibility → update</footer>
 <script src="/static/app.js"></script>
 </body>
 </html>

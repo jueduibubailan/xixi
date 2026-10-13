@@ -12,6 +12,16 @@ dependencies = [
     "pyyaml>=6.0",
     "starlette>=0.40.0",
     "uvicorn>=0.30.0",
+    # Not our dependencies: the shipped POMO baseline's. Its
+    # `problems/*/pomo/POMO/utils/utils.py` (logging + plotting helpers, imported
+    # by the trainer, the tester and both entry points) needs `pytz`, `numpy` and
+    # `matplotlib`; upstream never declared them. Listing them here keeps the
+    # baseline importable out of the box, which the code-generation stage is told
+    # to rely on. `torch` is deliberately NOT here: the generated solver needs it,
+    # and the task config's `workspace.setup` is where that install belongs.
+    "pytz>=2023.3",
+    "numpy>=1.24",
+    "matplotlib>=3.7",
 ]
 
 [project.optional-dependencies]
