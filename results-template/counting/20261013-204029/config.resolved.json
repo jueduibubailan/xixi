@@ -1,0 +1,318 @@
+{
+  "llm": {
+    "backend": "mock",
+    "runtime": "claude_code",
+    "model": "deepseek-flash",
+    "claude_bin": "claude",
+    "max_turns": 0,
+    "permission_mode": "auto",
+    "extra_args": [],
+    "inherit_routing_env": true,
+    "env": {},
+    "timeout_seconds": 3600
+  },
+  "loop": {
+    "true": [
+      "code_error",
+      "code_revise"
+    ],
+    "until": "contract_passed",
+    "max_rounds": 5
+  },
+  "grader": {
+    "direction": "maximize",
+    "timeout": 900,
+    "args": {
+      "iterations": 100,
+      "require_solution_dump": true,
+      "require_feasible": true
+    },
+    "iterations": 100,
+    "instance_size": 8,
+    "require_solution_dump": true
+  },
+  "workspace": {
+    "results_dir": "./results-template",
+    "final_dir": "./workspace/final"
+  },
+  "run": {
+    "verbose": false,
+    "ui": false,
+    "session": "local"
+  },
+  "task": {
+    "name": "counting-on-POMO",
+    "slug": "counting",
+    "description": "A minimal worked example, used as the template for a new problem.\n\nAn instance is a JSON object `{\"numbers\": [<int>, ...]}`. Write a program that reads one\nand reports, for that list:\n\n  * `total`  -- the sum of the numbers;\n  * `squares`-- each number multiplied by itself, in the same order.\n\nThe program must:\n  1. accept `--path` pointing either at one instance `.json` or at a directory of them;\n  2. print `the initial process is successful, the initial cost is <float>` and then\n     `the process is successful, the best cost is <float>`;\n  3. with `--save-solution <file>`, write `{\"total\": <int>, \"squares\": [<int>, ...],\n     \"cost\": <float>}` to that file.\n\n`cost` is 0.0 when the answer is right. A wrong answer is what makes the run fail, which\nis the point: the exit gate is what tells the pipeline whether the code it generated\nactually solves the problem.\n",
+    "tips": "- The three requirements above are the contract. The grader checks 1 and 3; the executor\n  checks 2.\n- The two printed lines are matched by the regexes in `program:` below. Changing the\n  wording means changing the regex too, or the run will fail with \"no cost found\".\n- Nothing here depends on POMO. A problem whose baseline is not POMO can still use the\n  whole pipeline -- `seed/` is optional and the correspondence table can stay empty.\n- The instance set is built by `grader/template_grader.py:build_dataset`, which the\n  engine calls *before* any agent runs. It is read-only to the agent.\n"
+  },
+  "problem": {
+    "slug": "counting",
+    "name": "Sum and sum of squares",
+    "kind": "toy",
+    "variant_label": "counting-on-POMO",
+    "tag": "COUNTER",
+    "checks": "grader/template_grader.py",
+    "agent_context": "context.md",
+    "generated": {
+      "dir": "artifacts/generated",
+      "program": "run.py",
+      "required": [
+        "run.py"
+      ],
+      "prefix": "{problem}",
+      "files": [
+        "run.py",
+        "README.md"
+      ],
+      "correspondence": {
+        "run.py": null,
+        "README.md": null
+      },
+      "expected_params": {},
+      "dimensions": {
+        "problem_size": "{n}"
+      }
+    },
+    "cli": {
+      "path_arg": "--path",
+      "iteration_arg": "--iteration",
+      "save_solution_arg": "--save-solution",
+      "extra_args": []
+    },
+    "program": {
+      "best_regex": "the process is successful, the best cost is (\\d+(?:\\.\\d+)?)",
+      "initial_regex": "the initial process is successful, the initial cost is (\\d+(?:\\.\\d+)?)",
+      "expected_lines": [
+        "the initial process is successful, the initial cost is {cost}",
+        "the process is successful, the best cost is {cost}"
+      ],
+      "accepts": [
+        "--path",
+        "--iteration",
+        "--save-solution"
+      ]
+    },
+    "data": {
+      "dir": "instances/data/counting",
+      "instance_glob": "n{n}/*.json",
+      "ready_marker": "manifest.json",
+      "generator": "grader/template_grader.py:build_dataset",
+      "sizes": [
+        "{n}"
+      ],
+      "count_per_size": 2,
+      "seed": 1234,
+      "largest": 20,
+      "stage_inputs": {
+        "code_revise": [
+          "artifacts/analysis/analysis.json",
+          "artifacts/generated",
+          "artifacts/runs",
+          "artifacts/revisions"
+        ]
+      }
+    },
+    "resources": {
+      "baseline_dir": "seed",
+      "baseline_subdirs": [],
+      "notes": "seed/README.md",
+      "export": {
+        "mirror_root": ".",
+        "exclude": [
+          "__pycache__",
+          "records"
+        ]
+      }
+    },
+    "acceptance": {
+      "require_solution_dump": true,
+      "solution_key": "total"
+    },
+    "scorer": {
+      "kind": "inverse_cost",
+      "scale": 1.0,
+      "direction": "maximize"
+    },
+    "mock": {
+      "analysis": "mock_analysis.json",
+      "template": "mock_solver.py"
+    },
+    "dir": "G:\\work\\new\\problems\\_template",
+    "size": 20,
+    "_spec_program": {
+      "best_regex": "the process is successful, the best cost is (\\d+(?:\\.\\d+)?)",
+      "initial_regex": "the initial process is successful, the initial cost is (\\d+(?:\\.\\d+)?)",
+      "expected_lines": [
+        "the initial process is successful, the initial cost is {cost}",
+        "the process is successful, the best cost is {cost}"
+      ],
+      "accepts": [
+        "--path",
+        "--iteration",
+        "--save-solution"
+      ],
+      "program_relpath": "artifacts/generated/run.py"
+    },
+    "_spec_cli": {
+      "path_arg": "--path",
+      "iteration_arg": "--iteration",
+      "save_solution_arg": "--save-solution",
+      "extra_args": []
+    },
+    "_spec_data": {
+      "dir": "instances/data/counting",
+      "instance_glob": "n20/*.json",
+      "ready_marker": "manifest.json",
+      "generator": "grader/template_grader.py:build_dataset",
+      "sizes": [
+        "20"
+      ],
+      "count_per_size": 2,
+      "seed": 1234,
+      "largest": 20,
+      "stage_inputs": {
+        "code_revise": [
+          "artifacts/analysis/analysis.json",
+          "artifacts/generated",
+          "artifacts/runs",
+          "artifacts/revisions"
+        ]
+      }
+    },
+    "_spec_resources": {
+      "baseline_dir": "seed",
+      "baseline_subdirs": [],
+      "notes": "seed/README.md",
+      "export": {
+        "mirror_root": ".",
+        "exclude": [
+          "__pycache__",
+          "records"
+        ]
+      }
+    },
+    "_spec_scorer": {
+      "kind": "inverse_cost",
+      "scale": 1.0,
+      "direction": "maximize"
+    },
+    "_spec_generated": {
+      "dir": "artifacts/generated",
+      "program": "run.py",
+      "required": [
+        "run.py"
+      ],
+      "prefix": "COUNTER",
+      "files": [
+        "run.py",
+        "README.md"
+      ],
+      "correspondence": {
+        "run.py": null,
+        "README.md": null
+      },
+      "expected_params": {},
+      "dimensions": {
+        "problem_size": "20"
+      }
+    }
+  },
+  "stages": [
+    {
+      "name": "retrieval",
+      "kind": "agent",
+      "does": "agent turn",
+      "role": "src/cvrp/roles/retrieval_agent.md",
+      "prompt_key": "s0_retrieval",
+      "produces": [
+        "artifacts/records/retrieval.json"
+      ],
+      "timeout_seconds": 1800
+    },
+    {
+      "name": "analysis",
+      "kind": "agent",
+      "does": "agent turn",
+      "role": "src/cvrp/roles/analysis_agent.md",
+      "prompt_key": "s1_analysis",
+      "produces": [
+        "artifacts/analysis/analysis.json"
+      ],
+      "timeout_seconds": 3600
+    },
+    {
+      "name": "code_generation",
+      "kind": "agent",
+      "does": "agent turn",
+      "role": "src/cvrp/roles/code_generation_agent.md",
+      "prompt_key": "s2_codegen",
+      "produces": [
+        "artifacts/generated/"
+      ],
+      "timeout_seconds": 3600
+    },
+    {
+      "name": "code_error",
+      "kind": "executor",
+      "does": "executor + agent narration",
+      "role": "src/cvrp/roles/code_error_agent.md",
+      "produces": [
+        "artifacts/runs/s3_run_report.json"
+      ],
+      "steps": [
+        "py_compile",
+        "import_probe",
+        "correspondence",
+        "smoke_run",
+        "full_run"
+      ],
+      "timeout_seconds": 5400
+    },
+    {
+      "name": "code_revise",
+      "kind": "agent",
+      "does": "agent turn",
+      "role": "src/cvrp/roles/code_revise_agent.md",
+      "produces": [
+        "artifacts/revisions/",
+        "artifacts/reviews/"
+      ],
+      "timeout_seconds": 3600
+    },
+    {
+      "name": "feasibility",
+      "kind": "executor",
+      "does": "executor",
+      "produces": [
+        "artifacts/runs/s5_feasibility.json"
+      ],
+      "timeout_seconds": 1800
+    },
+    {
+      "name": "update",
+      "kind": "agent",
+      "does": "agent turn",
+      "role": "src/cvrp/roles/update_agent.md",
+      "prompt_key": "s7_update",
+      "produces": [
+        "records/main"
+      ],
+      "timeout_seconds": 1800
+    }
+  ],
+  "records": {
+    "dir": "./records-smoke",
+    "main": "main",
+    "related": "related",
+    "temp": "temp",
+    "max_candidates": 8,
+    "keep_attempts": 20,
+    "include_in_export": false
+  },
+  "scale": {
+    "problem_size": 20,
+    "pomo_size": 20,
+    "aug_factor": 8
+  }
+}

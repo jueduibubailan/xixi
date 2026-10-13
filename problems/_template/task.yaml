@@ -1,0 +1,192 @@
+# =====================================================================================
+# A problem bundle, used as the template for a NEW problem.
+#
+# Copy this directory to `problems/<your-problem>/` and edit the three marked blocks.
+# Nothing under `src/cvrp/` needs to change: the engine never names a variant.
+#
+#   problems/<name>/
+#   ├─ task.yaml   <- this file: the statement, the mechanisms, and this problem's hooks
+#   ├─ grader/     <- the checker + scorer (and the instance generator, in one file here)
+#   └─ seed/       <- OPTIONAL: the starting code an agent edits
+#
+# It runs as-is, so you can watch a fresh pipeline before changing anything:
+#
+#   uv run cvrp validate problems/_template/task.yaml
+#   uv run cvrp start    problems/_template/task.yaml llm.backend=mock \
+#                        records.dir=./records-smoke workspace.results_dir=./results-template
+#
+# The example problem is deliberately trivial -- read a list of integers and return their
+# sum and their sum of squares -- so that every mechanism is visible and nothing is hidden
+# behind domain complexity. Replace it with yours.
+# =====================================================================================
+task:
+  name: "counting-on-POMO"          # <-- EDIT: a short human name
+  slug: "counting"                  # <-- EDIT: must match the `problem.slug` below
+  description: |
+    A minimal worked example, used as the template for a new problem.
+
+    An instance is a JSON object `{"numbers": [<int>, ...]}`. Write a program that reads one
+    and reports, for that list:
+
+      * `total`  -- the sum of the numbers;
+      * `squares`-- each number multiplied by itself, in the same order.
+
+    The program must:
+      1. accept `--path` pointing either at one instance `.json` or at a directory of them;
+      2. print `the initial process is successful, the initial cost is <float>` and then
+         `the process is successful, the best cost is <float>`;
+      3. with `--save-solution <file>`, write `{"total": <int>, "squares": [<int>, ...],
+         "cost": <float>}` to that file.
+
+    `cost` is 0.0 when the answer is right. A wrong answer is what makes the run fail, which
+    is the point: the exit gate is what tells the pipeline whether the code it generated
+    actually solves the problem.
+  tips: |
+    - The three requirements above are the contract. The grader checks 1 and 3; the executor
+      checks 2.
+    - The two printed lines are matched by the regexes in `program:` below. Changing the
+      wording means changing the regex too, or the run will fail with "no cost found".
+    - Nothing here depends on POMO. A problem whose baseline is not POMO can still use the
+      whole pipeline -- `seed/` is optional and the correspondence table can stay empty.
+    - The instance set is built by `grader/template_grader.py:build_dataset`, which the
+      engine calls *before* any agent runs. It is read-only to the agent.
+
+problem:
+  # --- EDIT: identity. `tag` is what generated files are named after. -----------------
+  slug: "counting"
+  name: "Sum and sum of squares"
+  kind: "toy"                       # "vrp" for routing problems; free text otherwise
+  variant_label: "counting-on-POMO"
+  tag: "COUNTER"                    # -> COUNTEREnv.py, COUNTERTrainer.py, ...
+
+  # The problem-specific hooks: verify(), score(), extract_best_cost(), revision_hints()
+  # and build_dataset(). Its directory is put on `sys.path` while it loads, so it may
+  # import helper files sitting next to it.
+  checks: grader/template_grader.py
+
+  # Extra "Available inputs" text appended to every stage instruction. Optional.
+  agent_context: context.md
+
+  # --- EDIT: what the generated package must look like --------------------------------
+  # `files` is the complete deliverable, and it must include the program itself: anything
+  # present in `artifacts/generated/` but absent here counts as extra generated code and
+  # fails the gate. `correspondence` maps each file to the baseline file it was adapted
+  # from (null for files written from scratch). An empty table is correct when there is no
+  # baseline -- the "one-to-one with the seed" gate then has nothing to check.
+  generated:
+    dir: artifacts/generated
+    program: run.py
+    required: [run.py]
+    prefix: "{problem}"
+    files:
+      - run.py
+      - README.md
+    correspondence:
+      run.py: null
+      README.md: null
+    expected_params: {}
+    dimensions:
+      problem_size: "{n}"
+
+  # --- EDIT: how the generated program is invoked, and what it must print -------------
+  cli:
+    path_arg: "--path"
+    iteration_arg: "--iteration"
+    save_solution_arg: "--save-solution"
+    extra_args: []
+  program:
+    best_regex: 'the process is successful, the best cost is (\d+(?:\.\d+)?)'
+    initial_regex: 'the initial process is successful, the initial cost is (\d+(?:\.\d+)?)'
+    expected_lines:
+      - "the initial process is successful, the initial cost is {cost}"
+      - "the process is successful, the best cost is {cost}"
+    accepts: ["--path", "--iteration", "--save-solution"]
+
+  # --- EDIT: where evaluation data comes from, and where it is cached ------------------
+  # `generator` names `file:function`, resolved inside this bundle. Either this or a
+  # `build_dataset` hook in `checks` must exist, or the pipeline has no instances to run on.
+  data:
+    dir: instances/data/counting
+    instance_glob: "n{n}/*.json"
+    ready_marker: manifest.json
+    generator: "grader/template_grader.py:build_dataset"
+    sizes: ["{n}"]
+    count_per_size: 2
+    seed: 1234
+    largest: 20
+    stage_inputs:
+      code_revise:
+        - artifacts/analysis/analysis.json
+        - artifacts/generated
+        - artifacts/runs
+        - artifacts/revisions
+
+  # --- EDIT: the starting code, if any. Omit the whole block when there is none. ------
+  # Resolved against this bundle's directory first, then the project root. `seed` here
+  # means "this bundle's seed/"; its contents land at the worktree root, which is the
+  # layout `generated.correspondence` addresses.
+  resources:
+    baseline_dir: "seed"
+    baseline_subdirs: []
+    notes: seed/README.md
+    export:
+      mirror_root: "."
+      exclude: [__pycache__, records]
+
+  acceptance:
+    require_solution_dump: true
+    solution_key: total
+  scorer:
+    kind: inverse_cost               # score = scale / best_cost
+    scale: 1.0
+    direction: maximize
+
+  # Offline self-check payloads, read only by `llm.backend: mock`. Delete both if you do
+  # not need `llm.backend=mock`; a real run never touches them.
+  mock:
+    analysis: mock_analysis.json
+    template: mock_solver.py
+
+# The seven stages, their roles, prompt keys and budgets. `stages: default` expands to
+# `cvrp.pipeline.spec.STAGES`; a problem overrides one stage by spelling it out here.
+stages: default
+
+llm:
+  # `claude_code` is the runtime this project is verified on: it passes the instruction as
+  # `claude -p <prompt>`, which a Linux host accepts (ARG_MAX ~2 MB) and which has run end
+  # to end. See note1.md 2.22 for why `dsh` is implemented but not shipped as the default.
+  backend: "claude_code"      # claude_code | coral | dsh (deepseek_harness) | mock
+  runtime: "claude_code"      # CORAL-style runtime name (kept for shell parity)
+  model: "deepseek-flash"     # model id passed to the runtime CLI
+  claude_bin: "claude"        # resolved via PATH; set an absolute path if needed
+  max_turns: 0                # 0 = let the session run until it exits naturally
+  permission_mode: "auto"     # passed as --permission-mode
+  extra_args: []
+  # A model name that is not native to Anthropic only works when ANTHROPIC_BASE_URL points
+  # at a router, so the shell's routing variables are inherited by default.
+  inherit_routing_env: true
+  env: {}
+  timeout_seconds: 3600       # per-stage wall clock before we kill the agent
+
+records:
+  dir: "./records"
+  main: main
+  related: related
+  temp: temp
+  max_candidates: 8
+  keep_attempts: 20
+  include_in_export: false
+
+workspace:
+  results_dir: "./results"
+  final_dir: "./workspace/final"
+
+grader:
+  iterations: 100
+  instance_size: 8
+  require_solution_dump: true
+
+run:
+  verbose: false
+  ui: false
+  session: "local"

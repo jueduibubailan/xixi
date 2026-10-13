@@ -22,7 +22,7 @@ from cvrp.problems import (
     load_problem,
 )
 from cvrp.problems.scaffold import scaffold_problem
-from tests.conftest import PACKAGE_PROBLEMS, write_project
+from tests.conftest import PACKAGE_PROBLEMS, baseline_of, write_project
 
 TASK_YAML = """
 task:
@@ -56,12 +56,47 @@ def test_shipped_cvrptw_problem_loads():
     assert plugin.instance_glob == "n20/*.json"
 
 
-def test_prompt_paths_resolve_inside_the_problem():
+def test_every_stage_prompt_resolves_to_a_readable_file():
+    """Prompts come from the engine's shared pack unless the problem overrides one.
+
+    The shared pack renders variant-neutral text (`{problem}`, `{n}`, `{variant_label}`,
+    `{task_description}`), which is what lets a problem directory hold only its task file,
+    its seed and its grader. The property worth pinning is that *every* stage a task can
+    name resolves to a non-empty file: a missing prompt renders an empty instruction, and
+    that failure mode costs a whole run.
+    """
+    from cvrp.pipeline.stages import STAGE_PROMPT_KEYS
+
     plugin = load_problem(PACKAGE_PROBLEMS / "cvrptw", slug="cvrptw")
-    for key in ("analysis", "codegen", "revise", "error_analyse"):
+    for stage, key in STAGE_PROMPT_KEYS.items():
         path = Path(plugin.prompt(key))
-        assert path.is_file(), (key, path)
-        assert plugin.root in path.parents
+        assert path.is_file(), (stage, key, path)
+        assert path.read_text(encoding="utf-8").strip(), f"{stage} prompt is empty"
+
+    # prompts a stage asks for by an explicit key rather than by stage name
+    for key in (
+        "analysis_judge",
+        "codegen_judge",
+        "error_narrate",
+        "code_review",
+        "error_analyse",
+    ):
+        assert Path(plugin.prompt(key)).is_file(), key
+
+
+def test_a_problem_can_override_one_prompt_by_convention(scratch: Path):
+    """`prompts/<basename>.md` next to a problem's spec replaces just that one prompt."""
+    plugin = load_problem(PACKAGE_PROBLEMS / "cvrptw", slug="cvrptw")
+    default = Path(plugin.prompt("analysis"))
+    assert default.parent.name == "prompts"
+
+    override_dir = scratch / "problem"
+    (override_dir / "prompts").mkdir(parents=True)
+    (override_dir / "prompts" / "s1_analysis.md").write_text("# custom\n", encoding="utf-8")
+    plugin.root = override_dir
+    assert Path(plugin.prompt("analysis")).read_text(encoding="utf-8") == "# custom\n"
+    # and the prompts it did not override still come from the pack
+    assert Path(plugin.prompt("codegen")) == default.parent / "s2_codegen.md"
 
 
 def test_agent_context_comes_from_the_problem():
@@ -72,7 +107,7 @@ def test_agent_context_comes_from_the_problem():
     """
     plugin = load_problem(PACKAGE_PROBLEMS / "cvrptw", slug="cvrptw")
     context = plugin.agent_context()
-    raw = (plugin.root / "problem_context.md").read_text(encoding="utf-8").strip()
+    raw = (plugin.root / "context.md").read_text(encoding="utf-8").strip()
     assert context == plugin.render(raw).strip()
     assert "checkpoint" in context.lower()
     assert "data/instances" in context
@@ -116,11 +151,11 @@ def test_the_deliverable_is_one_to_one_with_pomo():
         assert name.startswith(tag), f"{name} is not named after {tag}"
 
     # every declared deliverable is adapted from a real baseline file
-    pomo = PACKAGE_PROBLEMS / "cvrptw" / "pomo"
+    pomo = baseline_of(plugin)
     for name, source in plugin.correspondence.items():
         if source is None:
             continue
-        assert (pomo / Path(source).relative_to("pomo")).is_file(), f"{source} is not in the baseline"
+        assert (pomo / source).is_file(), f"{source} is not in the baseline"
         if name not in {"run.py", "README.md"}:
             assert name.startswith(tag) or name.startswith(("train_n", "test_n"))
 
@@ -223,7 +258,7 @@ def test_find_problem_dir_ignores_a_directory_without_a_spec(scratch: Path):
     project = write_project(scratch / "project", TASK_YAML, problem="cvrptw")
     (project / "problems" / "cvrptw").rename(project / "problems-away")
     # a directory with the right name but no spec
-    stray = project / "problems" / "cvrptw" / "pomo"
+    stray = project / "problems" / "cvrptw" / "seed" / "pomo"
     stray.mkdir(parents=True)
     (stray / "CVRProblemDef.py").write_text("# payload only\n", encoding="utf-8")
 
@@ -249,9 +284,11 @@ def test_unknown_problem_slug_is_a_config_error(scratch: Path):
         find_problem_dir("no-such-variant", {"_project_root": str(project)})
 
 
-def test_list_problems_includes_the_package_copy():
+def test_list_problems_finds_the_bundles():
+    """`list_problems` scans `problems/`, where a bundle is `task.yaml` + `seed/`."""
     slugs = list_problems({"_project_root": str(Path.cwd())})
     assert "cvrptw" in slugs
+    assert "cvrpltw" in slugs, "a second bundle must be discoverable too"
 
 
 def test_contract_reads_cli_and_regex_from_the_problem(scratch: Path):
@@ -312,7 +349,8 @@ def test_the_staged_baseline_is_importable_as_staged():
     import importlib
     import sys
 
-    pomo = PACKAGE_PROBLEMS / "cvrptw" / "pomo"
+    plugin = load_problem(PACKAGE_PROBLEMS / "cvrptw", slug="cvrptw")
+    pomo = baseline_of(plugin) / "pomo"
     assert (pomo / "POMO" / "utils" / "utils.py").is_file(), "the helper must ship with the baseline"
 
     offenders = [

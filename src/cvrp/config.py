@@ -12,6 +12,9 @@ from typing import Any
 
 import yaml
 
+from cvrp.bundle import expand_defaults
+from cvrp.pipeline.spec import DEFAULT_LOOP, STAGES
+
 DEFAULT_CONFIG_NAME = "configs/default.yaml"
 
 
@@ -129,9 +132,106 @@ def load_config(
     config["_task_path"] = str(task_file)
     config["_task_dir"] = str(task_file.parent)
     config["_project_root"] = str(root)
+
+    # A bundle carries its own problem spec: `problems/<name>/task.yaml` is both the
+    # problem statement and a runnable task, so there is no separate `problem.yaml` to
+    # look for. A task file elsewhere can point at a bundle with `problem.dir`, whose spec
+    # then fills in everything the task did not state itself.
+    _adopt_bundle(config, task_file, root)
+
+    config = expand_defaults(config)
     validate_config(config)
     attach_problem(config)
     return config
+
+
+def _adopt_bundle(config: dict[str, Any], task_file: Path, root: Path) -> None:
+    """Merge a bundle's problem spec into the task config, task keys winning.
+
+    Detecting the bundle from the task file comes first, and it is authoritative: if the
+    file *is* `problems/<name>/task.yaml`, that directory is the problem, whatever any
+    other key says. Only when the task file is not itself a bundle does an explicit
+    `problem.dir` (or a bare bundle name) get consulted, so a task can point at a bundle
+    from anywhere.
+    """
+    from cvrp.bundle import bundle_of, find_bundle, read_task_file
+
+    bundle: Path | None = bundle_of(task_file)
+    if bundle is None:
+        explicit = str((config.get("problem") or {}).get("dir") or "").strip()
+        if explicit:
+            candidate = Path(explicit).expanduser()
+            if not candidate.is_absolute():
+                candidate = root / candidate
+            if (candidate / "task.yaml").is_file():
+                bundle = candidate
+            elif candidate.is_dir() and (candidate / "problem.yaml").is_file():
+                # the older shape: a directory with `problem.yaml` is the spec, and the
+                # task file that pointed here has already said everything else it needs
+                return
+            else:
+                # a bare name ("cvrptw") is also accepted
+                try:
+                    bundle = find_bundle(root, explicit)
+                except Exception:  # noqa: BLE001 - no bundle by that name; keep the spec
+                    bundle = None
+    if bundle is None:
+        return
+
+    spec = read_task_file(bundle / "task.yaml")
+    bundled_problem = dict(spec.get("problem") or {})
+    if not bundled_problem:
+        return
+    # The bundle's own task file *is* the spec, so it wins over anything a task file said
+    # about the same keys: the old layout's `src/cvrp/problems/<slug>` paths must not
+    # override where the bundle actually lives. A root-level task.yaml that pointed at the
+    # legacy location would otherwise silently keep loading it.
+    is_own_spec = bundle == Path(task_file).resolve().parent
+    merged_problem = dict(bundled_problem)
+    if not is_own_spec:
+        merged_problem.update(
+            {k: v for k, v in (config.get("problem") or {}).items() if not k.startswith("_")}
+        )
+    merged_problem["dir"] = str(bundle)
+    config["problem"] = merged_problem
+    del is_own_spec
+    # Anything else the bundle's task file declares that this task left out: the loop, the
+    # workspace defaults, the grader arguments. The task's own values always win.
+    for key, value in spec.items():
+        if key in {"task", "problem", "stages", "loop"}:
+            continue
+        if key not in config or config[key] in (None, {}, []):
+            config[key] = value
+    if config.get("stages") in (None, "default"):
+        config["stages"] = spec.get("stages", "default")
+    if not config.get("loop") and spec.get("loop"):
+        config["loop"] = spec["loop"]
+
+
+def _explicit_problem_root(raw: str, config: dict[str, Any]) -> Path | None:
+    """The problem directory an explicit `problem.dir` names, or None if it names nothing.
+
+    Both layouts are accepted: a bundle (`task.yaml` + `seed/`) and the older shape (a
+    directory carrying `problem.yaml`). Returning None means "not an explicit directory
+    after all", so the caller falls back to a search.
+    """
+    candidate = Path(raw).expanduser()
+    if not candidate.is_absolute():
+        for anchor in (
+            config.get("_project_root"),
+            config.get("_task_dir"),
+            Path.cwd(),
+        ):
+            if anchor:
+                resolved = Path(str(anchor)) / candidate
+                if resolved.is_dir():
+                    candidate = resolved
+                    break
+    if not candidate.is_dir():
+        return None
+    if (candidate / "task.yaml").is_file() or (candidate / "problem.yaml").is_file():
+        return candidate
+    return None
 
 
 def attach_problem(config: dict[str, Any]) -> dict[str, Any]:
@@ -164,7 +264,14 @@ def attach_problem(config: dict[str, Any]) -> dict[str, Any]:
     lookup["problem"] = user_overrides
     try:
         scale = scale_from_config(config)
-        root = find_problem_dir(slug, lookup)
+        # An explicit `problem.dir` is taken at its word: it is either the bundle that
+        # supplied the spec, or a legacy directory carrying `problem.yaml`. Searching first
+        # would silently prefer a same-named directory elsewhere (the engine's own packaged
+        # problems), which is exactly the confusion this indirection exists to remove.
+        explicit_dir = str(user_overrides.get("dir") or "").strip()
+        root = _explicit_problem_root(explicit_dir, config) if explicit_dir else None
+        if root is None:
+            root = find_problem_dir(slug, lookup)
         plugin = load_problem(root, slug=slug, scale=scale)
     except ProblemError as exc:
         raise ConfigError(str(exc)) from exc
@@ -206,30 +313,26 @@ def attach_problem(config: dict[str, Any]) -> dict[str, Any]:
 # validation / accessors
 # --------------------------------------------------------------------------- #
 
+#: The pipeline tables live in `cvrp.pipeline.spec`, a leaf module, so both this config and
+#: the bundle loader can read them while a config is still being built. Re-exported here
+#: because `cvrp.config.STAGES` is the name the rest of the project (and its tests) use.
+
+#: Kept for the older, looser shape: the minimal stage list a hand-written config needs.
 DEFAULT_STAGES: list[dict[str, Any]] = [
-    # Retrieval first: it is the only stage that reads the cross-run knowledge base, and
-    # what it selects is what analysis gets to act on.
-    {"name": "retrieval", "kind": "agent", "produces": ["artifacts/records/retrieval.json"]},
-    {"name": "analysis", "kind": "agent", "produces": ["artifacts/analysis/analysis.json"]},
-    {
-        "name": "code_generation",
-        "kind": "agent",
-        "produces": ["artifacts/generated/run.py"],
-    },
-    {
-        "name": "code_error",
-        "kind": "executor",
-        "produces": ["artifacts/runs/s3_run_report.json"],
-    },
-    {"name": "code_revise", "kind": "agent", "produces": ["artifacts/revisions/"]},
-    {
-        "name": "feasibility",
-        "kind": "executor",
-        "produces": ["artifacts/runs/s5_feasibility.json"],
-    },
-    # Last: the knowledge base is only written once the verdict is known, so a failed run
-    # cannot record its lessons as if they had worked.
-    {"name": "update", "kind": "agent", "produces": ["records/main"]},
+    {"name": stage["name"], "kind": stage["kind"], "produces": list(stage["produces"])}
+    for stage in STAGES
+]
+
+__all__ = [
+    "DEFAULT_CONFIG_NAME",
+    "DEFAULT_LOOP",
+    "DEFAULT_STAGES",
+    "STAGES",
+    "attach_problem",
+    "expand_defaults",
+    "get_stage",
+    "loop_config",
+    "task_slug",
 ]
 
 

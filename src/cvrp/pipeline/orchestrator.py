@@ -90,6 +90,9 @@ class Orchestrator:
             {
                 "_run_id": self.run_id,
                 "_project_root": str(self.root),
+                # The DSH runtime keeps its session state in a shared directory under the
+                # run, so consecutive stages inherit context instead of starting cold.
+                "_run_dir": str(self.run_dir),
             }
         )
         self.backend = make_backend(llm_config, problem=self.problem)

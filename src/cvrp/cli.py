@@ -443,6 +443,8 @@ def cmd_validate(args: argparse.Namespace) -> int:
     warnings: list[str] = []
     root = project_root(config)
 
+    from cvrp.pipeline.stages import stage_prompt_path
+
     for stage in config.get("stages", []):
         for key in ("role", "prompt", "judge_prompt", "analyse_prompt", "schema"):
             value = stage.get(key)
@@ -462,7 +464,22 @@ def cmd_validate(args: argparse.Namespace) -> int:
 
     declared = problem.spec.get("prompts") or {}
     if not declared:
-        problems.append(f"problem {problem.slug!r} declares no prompts; agents would be told nothing")
+        # No per-problem overrides is the normal case now: the engine's shared pack under
+        # `src/cvrp/prompts/` supplies every stage prompt, and a problem only names the
+        # ones it wants worded differently. What matters is that each stage resolves to a
+        # file, which the loop above already checks.
+        resolved = {
+            stage["name"]: stage_prompt_path(stage, config)
+            for stage in config.get("stages", [])
+            if stage.get("kind") == "agent"
+        }
+        missing = [name for name, path in resolved.items() if path is None]
+        if missing:
+            problems.append(
+                "no prompt resolved for stage(s) "
+                + ", ".join(sorted(missing))
+                + "; agents would be told nothing"
+            )
     for key, raw in declared.items():
         path = Path(str(raw))
         if not path.is_absolute():
@@ -490,7 +507,10 @@ def cmd_validate(args: argparse.Namespace) -> int:
     if raw_baseline:
         baseline = Path(raw_baseline)
         if not baseline.is_absolute():
-            baseline = root / baseline
+            # Same order the seeder uses: the problem directory first, then the project
+            # root. A bundle writes `seed`, which only exists relative to itself.
+            candidates = [problem.root / baseline, root / baseline]
+            baseline = next((c for c in candidates if c.is_dir()), candidates[0])
         if not baseline.is_dir():
             warnings.append(f"resources.baseline_dir does not exist: {baseline}")
         else:

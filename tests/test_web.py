@@ -130,18 +130,32 @@ def test_logs_endpoints(client: TestClient):
 
 
 def _write_knowledge_base(client: TestClient, *, run_id: str = "20250101-000000") -> Path:
-    """A knowledge base plus an index entry attributing it to a run."""
+    """A knowledge base plus an index entry attributing it to a run.
+
+    Written in the current convention: one general record, one problem-specific one, each
+    opening with its own `## Contents`.
+    """
     config = client.app.state.context.config
     from cvrp.records import main_dir
 
     root = main_dir(config)
     (root / "skills").mkdir(parents=True, exist_ok=True)
     (root / "notes").mkdir(parents=True, exist_ok=True)
+    (root / "skills" / "_global_skill.md").write_text(
+        "# Global skill\n\n## Contents\n\n- `Baseline hazards` — before adapting *(general)*\n\n"
+        "## Baseline hazards\n\n- the package has no `__init__.py`\n",
+        encoding="utf-8",
+    )
     (root / "skills" / "cvrptw_skill.md").write_text(
-        "# Skill — cvrptw\n\n## Proven fixes\n\n- use style_cvrp_20.json\n", encoding="utf-8"
+        "# Skill — cvrptw\n\n## Contents\n\n"
+        "- `Proven fixes` — read before changing a mask *(problem-specific)*\n\n"
+        "## Proven fixes\n\n- use style_cvrp_20.json\n",
+        encoding="utf-8",
     )
     (root / "notes" / "cvrptw_notes.md").write_text(
-        "# Notes — cvrptw\n\n## Traps\n\n- style_cvrp_100.json is not shipped\n", encoding="utf-8"
+        "# Notes — cvrptw\n\n## Contents\n\n- `Traps` — read first *(problem-specific)*\n\n"
+        "## Traps\n\n- style_cvrp_100.json is not shipped\n",
+        encoding="utf-8",
     )
     write_json(
         root / "index.json",
@@ -166,9 +180,22 @@ def test_records_endpoint_lists_the_knowledge_base(client: TestClient):
     paths = {item["path"] for item in payload["main"]}
     assert "main/skills/cvrptw_skill.md" in paths
     assert "main/notes/cvrptw_notes.md" in paths
-    assert payload["areas"]["skills"] == 1
-    item = next(entry for entry in payload["main"] if entry["path"].endswith("skill.md"))
-    assert "## Proven fixes" in item["headings"]
+    assert payload["areas"]["skills"] == 2, "the general record and the scoped one both live in skills/"
+    scoped = next(
+        entry for entry in payload["main"] if entry["path"] == "main/skills/cvrptw_skill.md"
+    )
+    general = next(
+        entry for entry in payload["main"] if entry["path"] == "main/skills/_global_skill.md"
+    )
+    # The record's own contents list travels with the listing, so the panel can show what
+    # is inside without opening the file.
+    assert "Proven fixes" in " ".join(scoped["toc"])
+    assert "Baseline hazards" in " ".join(general["toc"])
+    assert "problem-specific" in " ".join(scoped["toc"]), "the entry states its scope"
+    # and the two tiers are distinguishable without reading anything
+    assert scoped["tier"] == "scoped"
+    assert general["tier"] == "general"
+    assert payload["tiers"] == {"scoped": 2, "general": 1}
 
 
 def test_records_endpoint_marks_what_this_run_contributed(client: TestClient):
@@ -178,6 +205,7 @@ def test_records_endpoint_marks_what_this_run_contributed(client: TestClient):
     by_path = {item["path"]: item["from_this_run"] for item in payload["main"]}
     assert by_path["main/skills/cvrptw_skill.md"] is True, "this run wrote it"
     assert by_path["main/notes/cvrptw_notes.md"] is False, "this run did not"
+    assert by_path["main/skills/_global_skill.md"] is False, "no entry claims it"
 
 
 def test_records_endpoint_lists_this_runs_record_buckets(client: TestClient):

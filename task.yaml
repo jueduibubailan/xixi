@@ -1,183 +1,46 @@
-# Task entry point.
+# CVRPTW at n=20, written as a small task that points at the problem bundle.
+#
+# The problem itself -- its statement, its checker, its baseline -- lives in
+# problems/cvrptw/. This file only says which size to run and how.
 #
 #   uv run cvrp start task.yaml
-#
-# A *task* says what to build and which VRP variant it is. Everything
-# variant-specific -- the stage prompts, the generated file layout, the CLI
-# flags, the instance synthesis, the feasibility checks, the scoring -- lives in
-# the problem directory selected by `problem.slug`:
-#
-#   problems/<slug>/problem.yaml      the spec
-#   problems/<slug>/prompts/*.md      what each agent stage must do
-#   problems/<slug>/checks.py         verify / score / build_dataset hooks
-#
-# Start a new variant with:
-#   uv run cvrp new-problem <slug> --name "<Variant name>" --from "<what to solve>"
-#
-# All paths here resolve relative to this file, then the project root, then the
-# problem directory, so both `task.yaml` and `configs/tasks/*.yaml` work.
-
+#   uv run cvrp start task.yaml llm.backend=mock     # offline self-check
 task:
-  name: "CVRPTW-on-POMO"
-  slug: "cvrptw"
+  name: "CVRPTW-n20-on-POMO"
+  slug: "cvrptw-n20"
   description: |
-    Synthesize a new POMO-based solver for the **Capacitated Vehicle Routing
-    Problem with Time Windows (CVRPTW)**, by *modifying the input, state and
-    masking* of the existing POMO CVRP implementation -- not by rewriting its
-    neural backbone.
-
-    The seed code (the `pomo/` baseline staged into your worktree) solves plain
-    CVRP: it samples coordinates and demands, then rolls out POMO's RNN
-    encoder-decoder with a `visited` mask and a capacity mask. CVRPTW adds a
-    constraint on *when* each customer may be served, which forces:
-
-      1. two new per-instance tensors: `time_windows` (n+1, 2) and
-         `service_times` (n+1,);
-      2. one new per-step dynamic state: `current_time` (batch, pomo);
-      3. a new masking layer: a customer is masked when it is already visited,
-         when serving it would exceed capacity, or when it cannot be served
-         inside its time window given the arrival time;
-      4. a replacement of the capacity-only masking rule with a rule that also
-         carries a "return-to-depot is always allowed for feasibility" exception.
-
-    The checkpoint becomes available in your worktree as the path named by
-    `problem.yaml:resources.checkpoint`. It was trained by POMO on CVRP100, and
-    the synthesized solver must keep it loadable: the encoder's input dimension
-    stays unchanged, and any new information enters the decoder as an additional
-    concatenated feature.
-
+    Solve CVRPTW at n = 20: minimise total travel distance with a capacity limit, time
+    windows, service times and unit travel speed. See problems/cvrptw/task.yaml for the
+    full statement; this task runs it at 20 customers.
   tips: |
-    - Time is defined by Euclidean distance (travel time == distance). Do NOT
-      introduce a vehicle speed.
-    - Customers may be served at or after their window opens; arriving early is
-      allowed and the vehicle waits. Arriving after the window closes is infeasible.
-    - A vehicle may always return to the depot; returning early simply starts a
-      new route, and it costs the depot round trip.
-    - Service times accumulate onto the current time. Waiting accumulates too.
-    - The acceptance contract of the whole pipeline is textual: the generated
-      program must print both lines listed under `program.expected_lines` in
-      `problems/cvrptw/problem.yaml`, on stdout.
-    - Instances are synthesized locally (n=20). Nobody supplies a dataset.
+    Smallest instance size: the fastest way to see the pipeline work end to end.
 
-# Which problem directory describes this variant. `dir` is optional: by default
-# the engine looks in <project>/problems/<slug>/ and then inside the package.
 problem:
-  slug: "cvrptw"
-  # dir: "./problems/cvrptw"
+  dir: "problems/cvrptw"
+
+scale:
+  problem_size: 20          # customers (the instance DIMENSION is this + 1)
+  pomo_size: 20             # parallel rollouts; omit to default to problem_size
+  aug_factor: 8             # POMO's 8-fold symmetry augmentation
+
+stages: default
 
 llm:
-  backend: "claude_code"      # claude_code | coral | mock
-  runtime: "claude_code"      # CORAL-style runtime name (kept for shell parity)
-  model: "deepseek-flash"     # model id passed to `claude --model`
-  claude_bin: "claude"        # resolved via PATH; set an absolute path if needed
-  max_turns: 0                # 0 = let the session run until it exits naturally
-  permission_mode: "auto"     # passed as --permission-mode
-  extra_args: []              # extra CLI flags appended verbatim
-  # Credentials and routing are inherited from your shell by default, because a
-  # model name that is not native to Anthropic (deepseek-flash included) only works
-  # when ANTHROPIC_BASE_URL points at a router. Set inherit_routing_env: false to
-  # strip them for isolation, or name values below to override them.
+  backend: "claude_code"    # claude_code | coral | dsh | mock
+  model: "deepseek-flash"
   inherit_routing_env: true
-  env: {}
-  timeout_seconds: 3600       # per-stage wall clock before we kill the agent
-
-# The five stages are fixed; which prompt each agent stage reads, and what the
-# executors check, comes from the problem. `prompt` may be given here to override
-# the problem's own prompt for this task only.
-stages:
-  - name: retrieval
-    kind: agent
-    role: "src/cvrp/roles/retrieval_agent.md"
-    prompt: retrieval
-    produces: ["artifacts/records/retrieval.json"]
-    timeout_seconds: 1800
-
-  - name: analysis
-    kind: agent
-    role: "src/cvrp/roles/analysis_agent.md"
-    schema: "problems/cvrptw/schemas/analysis.schema.json"
-    produces: ["artifacts/analysis/analysis.json"]
-    timeout_seconds: 1800
-
-  - name: code_generation
-    kind: agent
-    role: "src/cvrp/roles/code_generation_agent.md"
-    produces: ["artifacts/generated/"]
-    timeout_seconds: 3600
-
-  - name: code_error
-    kind: executor            # no LLM
-    role: "src/cvrp/roles/code_error_agent.md"
-    produces: ["artifacts/runs/s3_run_report.json"]
-    steps: [py_compile, import_probe, smoke_run, full_run]
-
-  - name: code_revise
-    kind: agent
-    role: "src/cvrp/roles/code_revise_agent.md"
-    produces: ["artifacts/revisions/", "artifacts/reviews/"]
-    timeout_seconds: 3600
-
-  - name: feasibility
-    kind: executor            # no LLM
-    role: "src/cvrp/roles/feasibility_agent.md"
-    produces: ["artifacts/runs/s5_feasibility.json"]
-
-  # Last: the knowledge base is only written once the verdict is known, so a failed run
-  # cannot record its lessons as if they had worked.
-  - name: update
-    kind: agent
-    role: "src/cvrp/roles/update_agent.md"
-    prompt: update
-    produces: ["records/main"]
-    timeout_seconds: 1800
-loop:
-  # code_error -> code_revise -> code_error, until the acceptance contract passes.
-  on: ["code_error", "code_revise"]
-  until: "contract_passed"
-  max_rounds: 5
-
-grader:
-  # CORAL-style grader block. `cvrp grader` runs the same code path the
-  # orchestrator uses, so the score on the dashboard is the score the pipeline
-  # gated on. `entrypoint` is carried for parity with CORAL's config shape.
-  entrypoint: "cvrp.executor.grader:CodeGrader"
-  direction: "maximize"
-  timeout: 900
-  args:
-    require_feasible: true
-    # Iteration budget for the generated program's full run, and for the grader.
-    # Deliberately small: a revision round must stay cheap.
-    iterations: 100
-    # A run with no solution dump cannot be independently verified, so it fails
-    # by default. Set to false only if you deliberately accept unverified runs.
-    require_solution_dump: true
-
-records:
-  # Where the cross-run knowledge base lives. `dir` may be absolute if several projects
-  # should share one -- the point of the feature is that a new project can read what an
-  # earlier one learned.
-  dir: "./records"
-  main: main          # skills/notes/attempts: the durable part
-  related: related    # what retrieval selected, per run
-  temp: temp          # one record per agent, per run
-  max_candidates: 8   # retrieval's ranked shortlist size
-  keep_attempts: 20   # attempts blocks kept per problem
-  include_in_export: false
-
+  timeout_seconds: 3600
 
 workspace:
   results_dir: "./results"
   final_dir: "./workspace/final"
-  # The executor runs the generated program with *this* project's interpreter
-  # (sys.executable), not with whatever `python` is first on PATH. The generated
-  # POMO solver needs torch, so it is installed here rather than assumed.
-  # `uv pip install` is a fast no-op once satisfied, and this whole block runs only
-  # when its text changes (fingerprinted under .cvrp/setup.json), or with
-  # `cvrp start ... run.setup=force`.
-  setup:
-    - "uv pip install torch --index-url https://download.pytorch.org/whl/cpu"
+
+grader:
+  iterations: 1000
+  instance_size: 20
+  require_solution_dump: true
 
 run:
-  verbose: true
+  verbose: false
   ui: false
-  session: "local"                 # local | tmux (parity with CORAL)
+  session: "local"

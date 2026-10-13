@@ -117,7 +117,7 @@ async function loadStages() {
     item.innerHTML = `
       <span class="idx">${index + 1}</span>
       <span>
-        <span class="name">${esc(stage.name)} <span class="path">[${esc(stage.kind)}]</span></span>
+        <span class="name">${esc(stage.name)} <span class="path">[${esc(stage.does || stage.kind)}]</span></span>
         <div class="msg">${esc(stage.message || "")}</div>
         <div class="path">${esc((stage.present || []).join("  "))}</div>
       </span>
@@ -159,18 +159,27 @@ async function renderRecords() {
   $("count-run-records").textContent = run.length ? `${run.length}` : "0";
 
   if (state.tab === "records") {
-    const areas = payload.areas || {};
-    const summary = Object.keys(areas)
-      .sort()
-      .map((area) => `${area} ${areas[area]}`)
+    const tiers = payload.tiers || {};
+    const summary = ["general", "scoped"]
+      .filter((tier) => tiers[tier])
+      .map((tier) => `${tier} ${tiers[tier]}`)
       .join(" · ");
     setHead(`${esc(payload.main_dir || "records/main")}${summary ? ` — ${esc(summary)}` : ""}`);
-    renderList(main.map((item) => ({
+    // General records first: they hold for whatever problem is being solved, so they are
+    // what a reader should reach for when this variant looks unlike anything else here.
+    const ordered = [...main].sort((a, b) => {
+      const rank = (item) => (item.tier === "general" ? 0 : 1);
+      return rank(a) - rank(b) || String(a.path).localeCompare(String(b.path));
+    });
+    renderList(ordered.map((item) => ({
       path: item.path,
       label: item.path.replace(/^main\//, ""),
       size: item.bytes,
-      group: item.area,
-      badge: item.from_this_run ? "new" : "",
+      group: item.tier === "general" ? "general (any problem)" : item.area,
+      badge: [item.tier === "general" ? "general" : "", item.from_this_run ? "new" : ""]
+        .filter(Boolean)
+        .join(" "),
+      note: (item.toc || []).join(" · "),
     })), "the knowledge base is empty — the first run will create it");
     return;
   }
@@ -210,7 +219,8 @@ function renderList(items, emptyText) {
     node.dataset.path = item.path;
     if (item.path === state.file) node.classList.add("active");
     const badge = item.badge ? `<span class="badge new">${esc(item.badge)}</span>` : "";
-    node.innerHTML = `${esc(item.label)}${badge}<span class="size">${item.size}B</span>`;
+    const note = item.note ? `<div class="note">${esc(item.note)}</div>` : "";
+    node.innerHTML = `${esc(item.label)}${badge}<span class="size">${item.size}B</span>${note}`;
     node.onclick = () => openFile(item.path);
     list.appendChild(node);
   }

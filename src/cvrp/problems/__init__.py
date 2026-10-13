@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -104,14 +105,34 @@ class ProblemPlugin:
     # -- prompt / role resolution ------------------------------------------ #
 
     def prompt(self, key: str) -> str:
-        """Absolute path of a prompt declared in ``spec.prompts`` (or ``''``)."""
+        """Absolute path of a prompt, problem-specific or engine default.
+
+        A problem may override any stage prompt through ``prompts:`` in its own
+        ``task.yaml``; when it does not, the engine's shared pack under
+        ``src/cvrp/prompts/`` is used. That is what lets a new problem be a directory of
+        ``task.yaml`` + ``seed/`` + ``grader/`` instead of carrying nine near-identical
+        prompt files.
+
+        ``key`` may be either the stage name (``analysis``) or the pack's basename
+        (``s1_analysis``): the first reads well in a task file, the second is what the
+        shared pack is named after, and accepting both keeps one lookup instead of two.
+        """
         if not key:
             return ""
         raw = (self.spec.get("prompts") or {}).get(key)
-        if not raw:
-            return ""
-        path = Path(str(raw))
-        return str(path if path.is_absolute() else self.root / path)
+        if raw:
+            path = Path(str(raw))
+            return str(path if path.is_absolute() else self.root / path)
+        stem = PROMPT_KEY_ALIASES.get(key, key)
+        # Two ways a problem customises a prompt, tried in order: an explicit path in its
+        # own `prompts:` block, or a file in the conventional `prompts/` directory next to
+        # its spec, named after the pack basename (`prompts/s1_analysis.md`). Anything it
+        # does not override comes from the shared pack.
+        for candidate in (self.root / "prompts" / f"{stem}.md", DEFAULT_PROMPTS / f"{stem}.md"):
+            if candidate.is_file():
+                return str(candidate)
+        fallback = DEFAULT_PROMPTS / f"{key}.md"
+        return str(fallback) if fallback.is_file() else ""
 
     def agent_context(self) -> str:
         """Extra "Available inputs" text injected into every stage instruction.
@@ -406,17 +427,55 @@ class ProblemPlugin:
 # loading
 # --------------------------------------------------------------------------- #
 
+#: The engine's shared prompt pack. A problem overrides individual prompts by naming
+#: them under ``prompts:`` in its own task file; everything else comes from here, so a
+#: new problem directory holds only what is actually specific to it.
+DEFAULT_PROMPTS = Path(__file__).resolve().parent.parent / "prompts"
+
+#: Stage name -> the shared pack's basename. The reverse direction is how a task file can
+#: name a prompt by stage (`analysis:`) rather than by file (`s1_analysis:`).
+PROMPT_KEY_ALIASES = {
+    "retrieval": "s0_retrieval",
+    "analysis": "s1_analysis",
+    "analysis_judge": "s1_analysis_judge",
+    "codegen": "s2_codegen",
+    "code_generation": "s2_codegen",
+    "codegen_judge": "s2_codegen_judge",
+    "error_narrate": "s3_error_narrate",
+    "code_review": "s4_code_review",
+    "error_analyse": "s4_error_analyse",
+    "revise": "s4_revise",
+    "code_revise": "s4_revise",
+    "update": "s7_update",
+}
+
 
 def _load_file(path: Path) -> Any:
-    """Import a python file by path, without touching ``sys.path``."""
+    """Import a python file by path, with its own directory importable.
+
+    The directory is added to ``sys.path`` for the duration of the import so a bundle's
+    grader can be self-contained — `grader/grader.py` importing `cvrptw_gen` from the file
+    next to it — without asking every problem to be an installable package. It is removed
+    again so one problem's module names cannot shadow another's.
+    """
     path = Path(path)
     if not path.is_file():
         raise ProblemError(f"module not found: {path}")
-    spec = importlib.util.spec_from_file_location(f"cvrp_problem_{path.stem}_{abs(hash(str(path)))}", path)
+    folder = str(path.parent)
+    spec = importlib.util.spec_from_file_location(
+        f"cvrp_problem_{path.stem}_{abs(hash(str(path)))}", path
+    )
     if spec is None or spec.loader is None:
         raise ProblemError(f"cannot load module: {path}")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    sys.path.insert(0, folder)
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        if sys.path and sys.path[0] == folder:
+            sys.path.pop(0)
+        elif folder in sys.path:
+            sys.path.remove(folder)
     return module
 
 
@@ -618,13 +677,28 @@ def load_problem(
     root = Path(problem_dir)
     if not root.is_dir():
         raise ProblemError(f"problem directory not found: {root}")
+    # Two layouts, one loader: a bundle puts its spec in `task.yaml` under `problem:`,
+    # the older shape keeps a `problem.yaml` beside its prompts and checker.
     spec_file = root / "problem.yaml"
-    if not spec_file.is_file():
-        raise ProblemError(f"problem.yaml not found in {root}")
-    with spec_file.open("r", encoding="utf-8") as handle:
-        spec = yaml.safe_load(handle) or {}
+    if spec_file.is_file():
+        with spec_file.open("r", encoding="utf-8") as handle:
+            spec = yaml.safe_load(handle) or {}
+    else:
+        bundle_file = root / "task.yaml"
+        if not bundle_file.is_file():
+            raise ProblemError(
+                f"no spec in {root}: expected either problem.yaml or a bundle's task.yaml"
+            )
+        with bundle_file.open("r", encoding="utf-8") as handle:
+            bundle = yaml.safe_load(handle) or {}
+        spec = dict(bundle.get("problem") or {}) if isinstance(bundle, dict) else {}
+        if not spec:
+            raise ProblemError(f"{bundle_file} has no `problem:` block to use as a spec")
+        # A bundle's own task file is the authority on everything the problem declares;
+        # the caller's task file has already been merged on top by `config`.
+        spec.setdefault("slug", root.name)
     if not isinstance(spec, dict):
-        raise ProblemError(f"problem.yaml root must be a mapping: {spec_file}")
+        raise ProblemError(f"the problem spec must be a mapping: {root}")
 
     # Render before anything reads the spec: the checks module is handed the same
     # rendered mapping, so a hook that reads ``spec["data"]["sizes"]`` sees the
@@ -688,13 +762,21 @@ def find_problem_dir(slug: str, config: dict[str, Any] | None = None) -> Path:
     root = config.get("_project_root")
     if root:
         candidates.append(Path(str(root)) / PROBLEMS_ROOT / slug)
+    # The bundles shipped with the project, so a task may name a problem without pointing
+    # at its directory. Checked after the project's own, so a project copy always wins.
+    for anchor in (config.get("_project_root"), Path.cwd()):
+        if anchor:
+            candidates.append(Path(str(anchor)) / "problems" / slug)
     candidates.append(Path(__file__).resolve().parent / slug)
     for candidate in candidates:
-        # A directory only counts as a problem if it actually carries a spec.
-        # Without this check a stray directory (for example one holding only a
-        # problem's baseline payload) would shadow a perfectly good problem and
-        # fail later with a confusing "problem.yaml not found".
-        if candidate.is_dir() and (candidate / "problem.yaml").is_file():
+        # A directory counts as a problem if it carries a spec, in either layout: a bundle
+        # (`task.yaml` plus `seed/`, the shape a new problem is written in) or the older
+        # standalone `problem.yaml`. Without this check a stray directory -- one holding
+        # only a problem's baseline payload, say -- would shadow a good one and fail later
+        # with a confusing message from the loader.
+        if not candidate.is_dir():
+            continue
+        if (candidate / "problem.yaml").is_file() or (candidate / "task.yaml").is_file():
             return candidate
     raise ProblemError(
         f"no problem directory for slug {slug!r}; looked in: "
@@ -703,16 +785,29 @@ def find_problem_dir(slug: str, config: dict[str, Any] | None = None) -> Path:
 
 
 def list_problems(config: dict[str, Any] | None = None) -> list[str]:
-    """Slugs visible from the project root and from the package."""
+    """Problem directories visible from the project root and from the package.
+
+    A directory counts when it carries a spec in either layout: a bundle (`task.yaml`) or
+    the older standalone `problem.yaml`. Both the project's `problems/` and the engine's own
+    copy are scanned, so a project sees the shipped problems as well as its own.
+    """
     config = config or {}
     found: set[str] = set()
-    roots = []
+    roots: list[Path] = []
     if config.get("_project_root"):
         roots.append(Path(str(config["_project_root"])) / PROBLEMS_ROOT)
+        roots.append(Path(str(config["_project_root"])) / "problems")
+    roots.append(Path.cwd() / PROBLEMS_ROOT)
+    roots.append(Path.cwd() / "problems")
     roots.append(Path(__file__).resolve().parent)
     for root in roots:
-        if root.is_dir():
-            found.update(entry.name for entry in root.iterdir() if (entry / "problem.yaml").is_file())
+        if not root.is_dir():
+            continue
+        for entry in root.iterdir():
+            if not entry.is_dir():
+                continue
+            if (entry / "problem.yaml").is_file() or (entry / "task.yaml").is_file():
+                found.add(entry.name)
     return sorted(found)
 
 

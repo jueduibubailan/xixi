@@ -7,9 +7,10 @@ Three areas, deliberately separate:
 ├─ temp/<run_id>/                  one file per agent, written during the run
 ├─ related/<run_id>/               what retrieval selected for this run
 └─ main/                           the cross-run knowledge base
-   ├─ skills/{_global_skill.md, <tag>_skill.md}
-   ├─ notes/<tag>_notes.md
-   ├─ attempts/<tag>_attempts.md
+   ├─ skills/_global_skill.md      ★general: holds for any problem
+   ├─ skills/<tag>_skill.md        problem-specific procedure
+   ├─ notes/<tag>_notes.md         problem-specific facts
+   ├─ attempts/<tag>_attempts.md   problem-specific run blocks
    └─ index.json
 ```
 
@@ -47,6 +48,22 @@ RECORD_KINDS: dict[str, str] = {
 MAIN_AREAS = ("skills", "notes", "attempts")
 
 GLOBAL_SKILL = "_global_skill.md"
+
+
+def is_general(name: str | Path) -> bool:
+    """Is this a cross-problem record?
+
+    Two tiers live side by side in `main/`: `_global_*.md` holds knowledge that transfers
+    to any problem this pipeline solves (baseline adaptation, the host environment, the
+    gate order), while `<tag>_*` holds what only that problem's runs know. The distinction
+    lives in the file name so both the retrieval prompt and a human can separate the tiers
+    without reading anything.
+    """
+    return Path(str(name)).name.startswith("_global")
+
+
+def tier_of(name: str | Path) -> str:
+    return "general" if is_general(name) else "scoped"
 
 
 def area_for(kind: str) -> str:

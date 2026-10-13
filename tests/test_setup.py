@@ -201,9 +201,14 @@ def test_the_staged_baseline_imports_with_the_documented_bootstrap():
     import subprocess
     import sys
 
+    from cvrp.problems import load_problem
     from tests.conftest import PACKAGE_PROBLEMS
 
-    pomo = PACKAGE_PROBLEMS / "cvrptw" / "pomo"
+    plugin = load_problem(PACKAGE_PROBLEMS / "cvrptw", slug="cvrptw")
+    baseline = Path(plugin.root) / str(
+        (plugin.spec.get("resources") or {}).get("baseline_dir") or "."
+    )
+    pomo = baseline / "pomo"
     script = (
         "import sys\n"
         f"sys.path.insert(0, {str(pomo.parent)!r})\n"

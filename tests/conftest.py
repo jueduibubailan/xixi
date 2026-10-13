@@ -14,7 +14,11 @@ import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SCRATCH_ROOT = PROJECT_ROOT / ".test-tmp"
-PACKAGE_PROBLEMS = PROJECT_ROOT / "src" / "cvrp" / "problems"
+#: The problem bundles: `problems/<name>/{task.yaml, seed/, grader/}`. Kept as the name a
+#: test imports because it is what the test body wants -- the *problem*, not where it lives.
+PACKAGE_PROBLEMS = PROJECT_ROOT / "problems"
+#: The engine's own package, for the loader tests.
+LOADER_PACKAGE = PROJECT_ROOT / "src" / "cvrp" / "problems"
 
 
 @pytest.fixture()
@@ -27,13 +31,24 @@ def scratch(request) -> Path:
     return target
 
 
-def install_problem(project: Path, slug: str = "cvrptw") -> Path:
-    """Copy a shipped problem into ``<project>/problems/<slug>/``.
+def baseline_of(problem) -> Path:
+    """The directory ``resources.baseline_dir`` resolves to, for a loaded problem.
 
-    Tests do this rather than pointing the config at the package directory,
-    because a stage worktree must contain the problem's baseline resources.
-    Copying the whole problem makes the scratch project self-contained, which is
-    exactly the situation a user's project is in.
+    A bundle keeps its reference implementation in ``seed/`` and addresses it as
+    ``pomo/...`` relative to that. Tests that need to poke at the baseline go through here
+    rather than hardcoding ``<root>/pomo``, so moving it is a one-line change.
+    """
+    raw = str((problem.spec.get("resources") or {}).get("baseline_dir") or ".")
+    return Path(problem.root) / raw
+
+
+def install_problem(project: Path, slug: str = "cvrptw") -> Path:
+    """Copy a shipped problem bundle into ``<project>/problems/<slug>/``.
+
+    Tests do this rather than pointing the config at the shipped directory, because a stage
+    worktree must contain the problem's baseline and its grader. Copying the whole bundle
+    makes the scratch project self-contained, which is exactly the situation a user's
+    project is in.
     """
     source = PACKAGE_PROBLEMS / slug
     if not source.is_dir():

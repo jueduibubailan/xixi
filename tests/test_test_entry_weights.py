@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 
 from cvrp.problems import load_problem
-from tests.conftest import PACKAGE_PROBLEMS
+from tests.conftest import PACKAGE_PROBLEMS, baseline_of
 
 EPOCH_PREFIX = "checkpoint-"
 CHECKPOINT_GLOB = "checkpoint"
@@ -140,7 +140,7 @@ def test_the_plotting_styles_cover_the_shipped_set():
     copy pinning `ylim` to `10..30`. It now mirrors `style_cvrp_20.json`, so copying the
     baseline's own `train_n100.py` line is safe.
     """
-    styles = PROBLEM.root / "pomo" / "POMO" / "utils" / "log_image_style"
+    styles = baseline_of(PROBLEM) / "pomo" / "POMO" / "utils" / "log_image_style"
     for name in (
         "style_cvrp_20.json",
         "style_loss_1.json",

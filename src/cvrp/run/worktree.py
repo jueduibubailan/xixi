@@ -52,19 +52,21 @@ def _copy_tree(src: Path, dst: Path, skip: set[str] | None = None) -> None:
 def _resolve_baseline(problem: ProblemPlugin | None, raw: str) -> Path:
     """Resolve ``resources.baseline_dir``.
 
-    Search order: the project root (so a problem can point at a shared
-    ``./baseline``), then the problem directory (so a problem can ship its payload
-    next to its spec, which is what the shipped ``cvrptw`` example does).
+    A relative path is tried against the problem directory first and the project root
+    second. The problem directory wins because a bundle's spec is written relative to
+    itself: `"."` there means "the bundle", whose `seed/` holds the baseline. Resolving
+    `"."` against the project root instead would copy the entire project into every
+    worktree -- which is exactly what it did before this order was fixed.
     """
     path = Path(raw).expanduser()
     if path.is_absolute():
         return path
     candidates: list[Path] = []
+    if problem is not None:
+        candidates.append(problem.root / path)
     project_root = (problem.spec or {}).get("_project_root") if problem else None
     if project_root:
         candidates.append(Path(str(project_root)) / path)
-    if problem is not None:
-        candidates.append(problem.root / path)
     candidates.append(Path.cwd() / path)
     for candidate in candidates:
         if candidate.is_dir():

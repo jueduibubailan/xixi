@@ -20,10 +20,10 @@ records/                         `records.dir` (default `./records`, project-loc
 │  ├─ retrieval.json
 │  └─ <copied excerpts>.md
 └─ main/                         ★ the knowledge base -- survives every run
-   ├─ skills/_global_skill.md    procedure that holds for every problem
-   ├─ skills/<tag>_skill.md      procedure for this problem
-   ├─ notes/<tag>_notes.md       facts about this problem
-   ├─ attempts/<tag>_attempts.md one block per run
+   ├─ skills/_global_skill.md    procedure that holds for ANY problem  (general)
+   ├─ skills/<tag>_skill.md      procedure for this problem            (scoped)
+   ├─ notes/<tag>_notes.md       facts about this problem              (scoped)
+   ├─ attempts/<tag>_attempts.md one block per run                     (scoped)
    └─ index.json                 which run contributed what
 ```
 
@@ -111,6 +111,36 @@ was nothing" is information while a missing file is not. Finding nothing never b
 run.
 
 ---
+
+## 3b. Two tiers, and a record you can navigate
+
+The knowledge base mixes two kinds of knowledge, and the file name says which is which:
+
+| tier | file | holds | who should read it |
+|---|---|---|---|
+| **general** | `_global_*.md` | what holds for *any* problem the pipeline is given: adapting a baseline, the host environment, baseline hazards, checkpoint discipline, the gate order, symptom → fix pairs | every run, whoever the problem |
+| **scoped** | `<tag>_*.md` | what only this problem's runs know: its semantics, its constraints and masks, its traps, its measured numbers | runs of that problem |
+
+The test for the general tier is deliberately blunt: *if the problem changed tomorrow,
+would this still hold word for word?* Needing one noun changed means it is scoped — do not
+"generalize" it by writing the noun in the abstract, because that imports this problem's
+assumptions into every future run.
+
+**Every record opens with a `## Contents` block**, listing its sections as `-` bullets with
+a note on *when to read each one* and whether it is general or problem-specific:
+
+```markdown
+## Contents
+
+- `Semantics` — how time advances and what the units are *(problem-specific)*
+- `Traps` — read this before touching a mask *(problem-specific)*
+```
+
+That block is what makes the base usable rather than merely present: retrieval hands the
+contents lists to the retrieval agent, and the dashboard shows them, so a reader can decide
+what to load instead of pulling prose it does not need. The update gate reports a missing
+contents block as a **warning** — the content may be excellent, and a run is never lost to a
+heading.
 
 ## 4. What each knowledge file holds
 
@@ -209,6 +239,28 @@ informative without opening anything:
 retrieval   done   retrieval: selected 3 record(s) (attempts 1, notes 1, skills 1)
 update      done   update: created 0, merged 3 (attempts, notes, skills)
 ```
+
+## 8b. Running an offline smoke test without polluting the base
+
+The offline backend's update stage writes plausible-looking records that **no run
+verified**. Merged into a curated base they are noise at best and misleading at worst, so a
+smoke run must point the knowledge base somewhere disposable:
+
+```bash
+uv run cvrp start task.yaml llm.backend=mock records.dir=./records-smoke
+rm -rf records-smoke
+```
+
+Two guards also live in the merge itself, because a curated base has to survive a bad writer
+rather than trust it:
+
+- a file without a `## Contents` block is **not a record** and is skipped, not appended
+  (a stub once grafted a second, header-less document onto the curated notes);
+- a **repeated heading is not a new section** — its genuinely new lines merge into the
+  existing section. Before this, a second document's headings appended themselves and a
+  record ended up with two `## Verification playbook` sections and two document titles;
+- the **document title is not a section**: it gets one key whatever it says, and its text is
+  never merged as content, so a stub cannot rename a curated record.
 
 ## 9. Inspecting it from the command line
 

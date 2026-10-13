@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 
 from cvrp.problems import load_problem
-from tests.conftest import PACKAGE_PROBLEMS
+from tests.conftest import PACKAGE_PROBLEMS, baseline_of
 from tests.test_pipeline_offline import TASK_YAML
 
 PROBLEM = load_problem(PACKAGE_PROBLEMS / "cvrptw", slug="cvrptw")
@@ -61,7 +61,7 @@ def test_the_problem_declares_what_the_export_carries():
 
 def test_the_bundled_payload_is_the_runtime_import_surface():
     """`pomo/` has to contain everything the generated code imports."""
-    pomo = PROBLEM.root / "pomo"
+    pomo = baseline_of(PROBLEM) / "pomo"
     assert (pomo / "CVRProblemDef.py").is_file()
     for name in ("CVRPEnv.py", "CVRPModel.py", "CVRPTrainer.py", "CVRPTester.py"):
         assert (pomo / "POMO" / name).is_file()

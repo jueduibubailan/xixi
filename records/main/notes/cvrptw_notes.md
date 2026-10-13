@@ -1,24 +1,90 @@
 # Notes — cvrptw
 
+> Scope: **problem-specific**. Facts about CVRPTW itself. The cross-problem procedure is in
+> `skills/_global_skill.md` and is not repeated here.
+
+## Contents
+
+- `Identity` — what the tag covers, and which facts are scale-dependent *(problem-specific)*
+- `Semantics` — how time advances, what "travel time" is, what the units mean *(problem-specific)*
+- `Constraints → masking` — each constraint next to the mask that enforces it *(problem-specific)*
+- `Feasibility checklist` — what a checker must verify, in the problem's own terms *(problem-specific)*
+- `Traps` — read before touching a mask or the clock *(problem-specific)*
+- `Open questions` — undecided semantics and unmeasured risks *(problem-specific)*
+
 ## Identity
 
 - problem tag: `cvrptw`; `n` is per task (20 / 50 / 100), instance arrays are `n + 1` long.
 - one problem serves several scales, so procedure lives in `skills/` and scale-specific
   facts belong in the attempt that measured them.
 
-## Semantics (as implemented by the generated package for n=100)
+## Semantics
 
 - travel time **is** Euclidean distance; there is no vehicle speed and no time matrix.
 - `arrival = current_time + dist(current_node, candidate)`.
 - `current_time = max(arrival, ready) + service`; the depot has service 0 and selecting it
   resets the clock.
-- lateness (`arrival > due`) is masked, never repaired afterwards.
+- lateness (`arrival > due`) is masked, never repaired afterwards. The comparison is
+  **strict**: `arrival == due` is legal.
 - the depot window is `[0, horizon]`; `horizon` scales the generator's canonical schedule
   end (`HORIZON_SCALER = 1.5`), so horizon is a *derived* quantity, not a constant.
 - normalized capacity convention: the environment's load starts at `1.0` and the loader
   divides `node_demand` by the instance's own capacity; the checker works in raw units.
+- measured on the shipped n=100 instances: `min(due - dist(depot, j)) = 0.496` and no
+  customer's direct depot trip leaves the horizon, so every customer is reachable from the
+  depot and a depot return can always be followed by serving anything remaining.
+
+## Constraints → masking
+
+| id | constraint | enforced by |
+|---|---|---|
+| C1 | every customer served exactly once | `visited_mask` |
+| C2 | route load ≤ vehicle capacity (normalized: ≤ 1.0) | `capacity_mask` |
+| C3 | `arrival ≤ due`; early arrival is legal and waits | `time_window_mask` |
+| C4 | service completion ≤ `horizon` | `horizon_mask` |
+| C5 | every route starts and ends at the depot | `finished_termination_rule` + the depot being always selectable |
+
+Composition order inside `step()`: `visited` → `capacity` → `time_window` → `horizon` →
+**force index 0 (the depot) back to 0** → existing `finished` reopen last (so termination
+still wins). The forced reopen is what makes the state deadlock-free: a customer whose
+window has closed can never make the state unsolvable, because returning to the depot is
+always legal and resets the clock.
+
+`pomo_start_moves_bypass_mask`: the first two selections of every rollout are forced by the
+baseline (`selected_count` 0 → depot, 1 → customer `p + 1`) and do **not** consult the mask.
+That is POMO's multi-start design, and it is safe on the shipped data, but the run path must
+re-validate the final solution before dumping it.
+
+## Feasibility checklist
+
+1. every customer id `1..n` appears exactly once across the union of all routes (no
+   duplicates, none missing);
+2. every route is a non-empty list whose first and last element is 0 and which contains no
+   other 0;
+3. for each route, the sum of the raw demands of its customers is ≤ capacity (the checker's
+   tolerance is `1e-6` in raw units; the mask's margin is chosen to satisfy it);
+4. replaying a route from node 0 with `now = 0`: for each customer in order,
+   `now += euclid(previous, node)` — a violation if `now > due`; then
+   `now = max(now, ready) + service`;
+5. the service completion at the last customer of every route is ≤ `horizon`;
+6. the cost in the dump equals the recomputed sum of Euclidean leg lengths.
 
 ## Traps
+
+### `arrival > due` is strict, and `>=` is a different problem
+
+The late-arrival test is a **strict** comparison: arriving exactly at `due` is feasible. A
+mask written as `arrival >= due` silently forbids the boundary and makes the generated
+solver miss feasible solutions the shipped instances actually contain. Check the sign when
+comparing a mask against the checker — they must agree, and the checker uses `>`.
+
+### An action marked "always legal" must actually never be masked
+
+The depot is exempt from the time-window and horizon masks and is forced back to 0 after the
+constraints are unioned. Drop that line and any state whose clock has passed a horizon has
+**no legal action at all** — the rollout cannot continue, and the failure appears far from
+the cause. Whenever a mask rule declares an exception, verify the code applies it *after*
+the union, not before.
 
 ### A 1-based index used against a 0-based tensor crashes the first training batch
 

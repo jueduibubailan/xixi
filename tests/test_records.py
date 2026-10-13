@@ -129,10 +129,11 @@ def test_missing_run_records_are_absent_not_an_error(scratch: Path):
 
 def test_merge_creates_then_appends(scratch: Path):
     config = _config(scratch)
+    header = "# Skill\n\n## Contents\n\n- `Proven fixes` — before a mask *(problem-specific)*\n\n"
     first = scratch / "run1" / "records" / "main"
     (first / "skills").mkdir(parents=True)
     (first / "skills" / "cvrptw_skill.md").write_text(
-        "# Skill\n\n## Proven fixes\n\n- gate X needed Y\n", encoding="utf-8"
+        header + "## Proven fixes\n\n- gate X needed Y\n", encoding="utf-8"
     )
     report = merge_into_main(config, PROBLEM, scratch / "run1" / "records" / "main", "run1")
     assert report["created"] == ["skills/cvrptw_skill.md"]
@@ -140,7 +141,7 @@ def test_merge_creates_then_appends(scratch: Path):
     second = scratch / "run2" / "records" / "main"
     (second / "skills").mkdir(parents=True)
     (second / "skills" / "cvrptw_skill.md").write_text(
-        "# Skill\n\n## Proven fixes\n\n- gate X needed Y\n\n## New trap\n\n- Z is not shipped\n",
+        header + "## Proven fixes\n\n- gate X needed Y\n\n## New trap\n\n- Z is not shipped\n",
         encoding="utf-8",
     )
     report = merge_into_main(config, PROBLEM, second, "run2")
@@ -157,6 +158,28 @@ def test_append_unique_compares_content_not_whitespace():
     merged = append_unique(existing, incoming)
     assert merged.count("alpha") == 1
     assert "gamma" in merged
+
+
+def test_a_repeated_heading_never_produces_a_second_section():
+    """The failure that made this rule necessary: a second document appended whole.
+
+    A mock run wrote its own `_global_skill.md`, whose headings matched the curated file's.
+    Keying sections on their whole text treated the overlap as new material, and the result
+    had two `## Verification playbook` sections and two document headers.
+    """
+    existing = (
+        "# Global skill\n\n## Contents\n\n- `Playbook` — the gates *(general)*\n\n"
+        "## Playbook\n\n- five gates, in order\n"
+    )
+    incoming = (
+        "# Global skill (offline stub)\n\n## Contents\n\n- `Playbook` — the gates *(general)*\n\n"
+        "## Playbook\n\n- five gates, in order\n- reproduce one with `cvrp stage`\n"
+    )
+    merged = append_unique(existing, incoming)
+    assert merged.count("## Playbook") == 1, merged
+    assert "five gates, in order" in merged
+    assert "reproduce one with `cvrp stage`" in merged, "the genuinely new line still lands"
+    assert "offline stub" not in merged, "a repeated document is not a second document"
 
 
 def test_merge_ignores_empty_files(scratch: Path):
@@ -209,6 +232,134 @@ def test_attempts_are_pruned_to_the_keep_limit(scratch: Path):
     assert text.count("## 2026") == 3
     assert "run 6" in text and "run 4" in text
     assert "run 1" not in text
+
+
+# --------------------------------------------------------------------------- #
+# two tiers, and a navigable record
+# --------------------------------------------------------------------------- #
+
+
+def test_general_records_are_recognised_by_name():
+    from cvrp.records.layout import is_general, tier_of
+
+    assert is_general("_global_skill.md")
+    assert is_general("_global_attempts.md")
+    assert not is_general("cvrptw_skill.md")
+    assert tier_of("_global_skill.md") == "general"
+    assert tier_of("cvrptw_notes.md") == "scoped"
+
+
+def test_the_contents_block_is_extracted():
+    from cvrp.records.store import toc, toc_missing
+
+    text = (
+        "# Notes — x\n\n## Contents\n\n"
+        "- `Semantics` — how time advances *(problem-specific)*\n"
+        "- `Traps` — read first *(problem-specific)*\n\n"
+        "## Semantics\n\n- a rule\n"
+    )
+    entries = toc(text)
+    assert len(entries) == 2
+    assert "Semantics" in entries[0] and "problem-specific" in entries[0]
+    assert not toc_missing(text)
+
+
+def test_the_contents_extraction_survives_spellings_and_misses():
+    from cvrp.records.store import toc, toc_missing
+
+    # case, an inline description on the heading, and the Chinese spelling
+    for heading in ("## Contents", "## CONTENTS", "## Contents of this record", "## 内容索引"):
+        assert toc(f"# T\n\n{heading}\n\n- `A` — why\n"), heading
+    # a heading with no entries tells a reader nothing, so it counts as missing
+    assert toc_missing("# T\n\n## Contents\n\n## Real\n\n- x\n")
+    assert toc_missing("# T\n\n## Identity\n\n- no contents block\n")
+    assert toc_missing("")
+
+
+def test_the_inventory_carries_tier_and_contents(scratch: Path):
+    config = _config(scratch)
+    root = main_dir(config)
+    (root / "skills").mkdir(parents=True)
+    (root / "skills" / "_global_skill.md").write_text(
+        "# Global\n\n## Contents\n\n- `Hazards` — before adapting *(general)*\n", encoding="utf-8"
+    )
+    (root / "skills" / "cvrptw_skill.md").write_text(
+        "# Scoped\n\n## Contents\n\n- `Fixes` — before a mask *(problem-specific)*\n", encoding="utf-8"
+    )
+    by_name = {item["path"]: item for item in knowledge_inventory(config, PROBLEM)}
+    general = by_name["main/skills/_global_skill.md"]
+    scoped = by_name["main/skills/cvrptw_skill.md"]
+    assert general["tier"] == "general" and general["toc"]
+    assert scoped["tier"] == "scoped" and scoped["toc"]
+
+
+def test_the_first_llm_retrieval_does_not_require_a_why(scratch: Path):
+    """`source` is what makes a selection checkable; the justification is good practice."""
+    from cvrp.pipeline import gates
+
+    worktree = scratch / "wt"
+    (worktree / "artifacts" / "records").mkdir(parents=True)
+    (worktree / "artifacts" / "records" / "retrieval.json").write_text(
+        json.dumps(
+            {
+                "empty": False,
+                "general": [{"source": "main/skills/_global_skill.md"}],
+                "selected": [{"source": "main/notes/cvrptw_notes.md"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert gates.gate_retrieval(scratch, worktree).passed
+
+
+def test_the_merge_refuses_a_file_that_is_not_a_record(scratch: Path):
+    """A stub without a contents block must not be grafted onto the real record.
+
+    This is not hypothetical: the offline backend's stub was appended to the curated notes,
+    producing a file with two `# Notes` headers — the curated one and
+    `# Notes — cvrptw (offline stub)`. `append_unique` compares sections, and a second
+    document's sections are all "new", so the guard has to be about the document itself.
+    """
+    config = _config(scratch)
+    source = scratch / "run" / "records" / "main"
+    (source / "notes").mkdir(parents=True)
+    (source / "notes" / "cvrptw_notes.md").write_text(
+        "# Notes — cvrptw (offline stub)\n\n## Traps\n\n- nothing recorded\n", encoding="utf-8"
+    )
+    report = merge_into_main(config, PROBLEM, source, "run")
+    assert report["created"] == [] and report["merged"] == []
+    assert report["skipped"] == ["notes/cvrptw_notes.md (no `## Contents` block)"]
+    assert not (main_dir(config) / "notes" / "cvrptw_notes.md").exists()
+
+    # the same file with a contents block is a record, and merges normally
+    (source / "notes" / "cvrptw_notes.md").write_text(
+        "# Notes — cvrptw\n\n## Contents\n\n- `Traps` — read first *(problem-specific)*\n\n"
+        "## Traps\n\n- nothing recorded\n",
+        encoding="utf-8",
+    )
+    report = merge_into_main(config, PROBLEM, source, "run")
+    assert report["created"] == ["notes/cvrptw_notes.md"]
+
+
+def test_the_update_gate_reports_a_missing_contents_block(scratch: Path):
+    """A record nobody can navigate is reported, but never fails the run."""
+    from cvrp.pipeline import gates
+
+    worktree = scratch / "wt"
+    folder = worktree / "records" / "main" / "notes"
+    folder.mkdir(parents=True)
+    (folder / "cvrptw_notes.md").write_text("# Notes\n\n## Traps\n\n- a fact\n", encoding="utf-8")
+
+    result = gates.gate_update(scratch, worktree)
+    assert result.passed, result.issues
+    assert any("Contents" in warning for warning in result.warnings)
+
+    (folder / "cvrptw_notes.md").write_text(
+        "# Notes\n\n## Contents\n\n- `Traps` — read first *(problem-specific)*\n\n"
+        "## Traps\n\n- a fact\n",
+        encoding="utf-8",
+    )
+    assert gates.gate_update(scratch, worktree).warnings == []
 
 
 # --------------------------------------------------------------------------- #

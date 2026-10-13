@@ -26,6 +26,7 @@ from cvrp.records.layout import (
     read_json,
     read_text,
     tag_of,
+    tier_of,
     write_json,
 )
 
@@ -59,6 +60,10 @@ def knowledge_inventory(config: dict[str, Any], problem: Any) -> list[dict[str, 
                     "area": area,
                     "path": f"main/{area}/{path.name}",
                     "bytes": path.stat().st_size,
+                    # Which tier, and what the record says is in it: both are what a
+                    # reader needs to decide whether to open it at all.
+                    "tier": tier_of(path.name),
+                    "toc": toc(path.read_text(encoding="utf-8", errors="replace")),
                     "headings": _headings(text),
                     "preview": _preview(text),
                 }
@@ -83,6 +88,47 @@ def knowledge_files(config: dict[str, Any]) -> list[Path]:
     if not root.is_dir():
         return []
     return sorted(path for area in MAIN_AREAS for path in (root / area).glob("*.md"))
+
+
+#: `## Contents`, plus the Chinese spelling, plus an inline description on the heading.
+CONTENTS_RE = re.compile(r"^##\s+(?:contents|内容索引)\b[^\n]*$", re.IGNORECASE | re.MULTILINE)
+
+
+def _contents_block(text: str) -> str | None:
+    """The lines between the `## Contents` heading and the next `## ` heading."""
+    match = CONTENTS_RE.search(text)
+    if match is None:
+        return None
+    rest = text[match.end() :]
+    stop = re.search(r"^##\s+", rest, re.MULTILINE)
+    return rest if stop is None else rest[: stop.start()]
+
+
+def toc(text: str) -> list[str]:
+    """The record's `## Contents` entries (`- ...` lines only).
+
+    The convention exists so a reader -- a retrieval agent, an analysis turn, a human --
+    can decide in one glance which sections are worth loading, rather than guessing from
+    headings and pulling in prose it does not need. Every record is expected to open with
+    it; `toc_missing` is what the update gate reports on.
+    """
+    body = _contents_block(text)
+    if body is None:
+        return []
+    return [line.strip() for line in body.splitlines() if line.strip().startswith("-")]
+
+
+def toc_missing(text: str) -> bool:
+    """Does this record fail to open with a usable table of contents?
+
+    A heading with no entries counts as missing: it satisfies a reader looking for the
+    section and then tells them nothing.
+    """
+    return not toc(text)
+
+
+def toc_of_file(path: Path) -> list[str]:
+    return toc(read_text(path, max_chars=200_000))
 
 
 def key_lines(path: Path, limit: int = 400) -> list[str]:
@@ -174,6 +220,14 @@ def merge_into_main(
             if not incoming.strip():
                 report["skipped"].append(f"{area}/{path.name} (empty)")
                 continue
+            # A record opens with a `## Contents` block. Something that does not is not a
+            # record -- the offline backend's stub, a scratch note, an agent's stray file --
+            # and appending it would graft a second, header-less document onto the real one
+            # (which is exactly what happened once: a mock run appended
+            # "# Notes — cvrptw (offline stub)" to the curated notes).
+            if toc_missing(incoming):
+                report["skipped"].append(f"{area}/{path.name} (no `## Contents` block)")
+                continue
             existed = destination.is_file()
             if existed:
                 merged = append_unique(destination.read_text(encoding="utf-8"), incoming)
@@ -189,30 +243,88 @@ def merge_into_main(
 
 
 def append_unique(existing: str, incoming: str) -> str:
-    """Append the blocks of `incoming` that are not already present.
+    """Merge the sections of `incoming` into `existing`, keyed by their heading.
 
-    Comparison is by normalised block text, so re-writing the same note in slightly
-    different whitespace does not duplicate it. Block boundaries are the markdown
-    headings: a knowledge file is a list of sections, and a section is the unit that is
-    either already known or new.
+    A knowledge file is a list of sections, so the section is the unit that is either
+    already known or new. Two rules make that safe:
+
+    * **a repeated heading is not a new section.** Keying on the whole block let a second
+      document append itself: a mock run wrote its own `_global_skill.md`, whose headings
+      matched the curated file's, and the result held two `## Verification playbook`
+      sections. A heading that already exists now absorbs the genuinely new lines from its
+      namesake; a heading that does not exist is added as a new section.
+    * **the document title is not a section.** Two records of the same kind differ in their
+      title line ("# Skill — cvrptw" vs "# Skill — cvrptw (offline stub)"). The established
+      title wins and only the body is merged, so a stub cannot rename a curated record.
     """
-    have = {_normalise(block) for block in _blocks(existing)}
-    kept = [existing.rstrip(), ""]
+    sections: dict[str, str] = {}
+    order: list[str] = []
+    for block in _blocks(existing):
+        key = _key_of(block)
+        if key and key not in sections:
+            order.append(key)
+        sections[key] = block
+
     for block in _blocks(incoming):
-        key = _normalise(block)
-        if not key or key in have:
+        key = _key_of(block)
+        if key not in sections:
+            order.append(key)
+            sections[key] = block.strip()
             continue
-        have.add(key)
-        kept.append(block.strip())
-        kept.append("")
-    return "\n".join(kept).rstrip() + "\n"
+        sections[key] = _merge_section(sections[key], block)
+
+    return "\n\n".join(sections[key].strip() for key in order).rstrip() + "\n"
+
+
+#: Every document has exactly one title, so it gets one key no matter what it says. Keying
+#: it by its text would let `# Skill — cvrptw (offline stub)` pass as a second document.
+TITLE_KEY = "#"
+
+
+def _key_of(block: str) -> str:
+    heading = _heading_of(block)
+    if heading.startswith("# ") and not heading.startswith("## "):
+        return TITLE_KEY
+    return heading
+
+
+def _merge_section(existing: str, incoming: str) -> str:
+    """`existing`, plus the lines of `incoming` it does not already have.
+
+    The heading line is the key that got us here, so it is never merged as content — not
+    for a section (whose `## Name` would otherwise be duplicated inside itself) and not for
+    the document title (which would let a stub rename a curated record).
+    """
+    head, *body_lines = existing.splitlines()
+    have = {_normalise(line) for line in body_lines if line.strip()}
+    extra = [
+        line
+        for line in incoming.splitlines()[1:]
+        if line.strip() and _normalise(line) not in have
+    ]
+    if not extra:
+        return existing
+    return "\n".join([head, *body_lines, *extra])
+
+
+def _heading_of(block: str) -> str:
+    first = block.strip().splitlines()[0] if block.strip() else ""
+    return first if first.startswith("#") else ""
 
 
 def _blocks(text: str) -> list[str]:
+    """Split a record into its document title and one block per section.
+
+    A block starts at a heading. `##` and deeper always start one; a `# ` line starts one
+    only when a block is already open, so the document title stands alone instead of
+    swallowing the first section (which is what made the `## Contents` heading of an
+    appended document land inside its title).
+    """
     blocks: list[str] = []
     current: list[str] = []
     for line in text.splitlines():
-        if line.startswith("#") and current:
+        starts_block = line.startswith("##") or (line.startswith("# ") and current)
+        if starts_block and current:
             blocks.append("\n".join(current))
             current = [line]
         else:

@@ -266,10 +266,12 @@ class CoralClaudeCodeBackend(ClaudeCodeBackend):
 
 
 def make_backend(llm_config: dict | None = None, problem: Any | None = None) -> LLMBackend:
-    """Factory honouring ``llm.backend`` (``claude_code`` | ``coral`` | ``mock``).
+    """Factory honouring ``llm.backend``.
 
-    ``problem`` is forwarded to the mock backend, which derives its stub payloads
-    from the problem's own spec rather than from anything engine-side.
+    Recognised: ``claude_code`` (default) | ``coral`` | ``dsh`` (DeepSeek Harness, with the
+    aliases CORAL accepts) | ``mock`` (offline). ``problem`` is forwarded to the mock
+    backend, which derives its stub payloads from the problem's own spec rather than from
+    anything engine-side.
     """
     cfg = dict(llm_config or {})
     backend = str(cfg.get("backend") or "claude_code").lower()
@@ -279,6 +281,13 @@ def make_backend(llm_config: dict | None = None, problem: Any | None = None) -> 
         return MockBackend(cfg, problem=problem)
     if backend in ("coral", "coral_claude_code"):
         return CoralClaudeCodeBackend(cfg)
+    if backend in ("dsh", "deepseek", "deepseek_harness", "deepseek-harness"):
+        from cvrp.llm.dsh import DshBackend
+
+        return DshBackend(cfg)
     if backend in ("claude", "claude_code", "claudecode"):
         return ClaudeCodeBackend(cfg)
-    raise ValueError(f"unknown llm.backend: {backend!r}")
+    raise ValueError(
+        f"unknown llm.backend: {backend!r}; expected one of "
+        "claude_code, coral, dsh (deepseek_harness), mock"
+    )

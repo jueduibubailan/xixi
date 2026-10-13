@@ -1,0 +1,11 @@
+mock turn complete for stage code_generation
+
+```json
+{
+  "written": [
+    "README.md",
+    "run.py"
+  ],
+  "mock": true
+}
+```

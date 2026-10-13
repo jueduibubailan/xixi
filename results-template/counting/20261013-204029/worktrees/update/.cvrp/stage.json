@@ -1,0 +1,17 @@
+{
+  "stage": {
+    "name": "update",
+    "kind": "agent",
+    "does": "agent turn",
+    "role": "src/cvrp/roles/update_agent.md",
+    "prompt_key": "s7_update",
+    "produces": [
+      "records/main"
+    ],
+    "timeout_seconds": 1800
+  },
+  "run_dir": "G:\\work\\new\\results-template\\counting\\20261013-204029",
+  "round": 0,
+  "instruction_file": "CVPR.md",
+  "problem": "counting"
+}

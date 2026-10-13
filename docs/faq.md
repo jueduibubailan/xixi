@@ -142,7 +142,7 @@ Nothing about the selection is compared against its plan, and a missing or thin
 error and revise stages deliberately read none of it: they work from the analysis contract
 and from what the code actually does when it runs.
 
-Set `records.dir` to an absolute path to share one knowledge base across projects. `uv run cvrp ui` has a **Files** card whose *Knowledge base* tab browses `records/main/` and marks this run's contributions with `[new]`; the *This run* tab shows the per-run `temp/` and `related/` buckets. See [docs/records.md](records.md).
+The base has two tiers: `_global_*.md` holds what applies to any problem, and `<tag>_*.md` what applies to one. Every record opens with a `## Contents` list so a reader can see what is inside before loading it. Set `records.dir` to an absolute path to share one knowledge base across projects. `uv run cvrp ui` has a **Files** card whose *Knowledge base* tab browses `records/main/` and marks this run's contributions with `[new]`; the *This run* tab shows the per-run `temp/` and `related/` buckets. See [docs/records.md](records.md).
 
 ### Where do the plotting style files live, and what do their bounds mean?
 

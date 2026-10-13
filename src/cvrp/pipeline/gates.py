@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from cvrp.records.store import toc_missing
 from cvrp.run.worktree import changed_since_snapshot, untouched_outputs
 
 ANALYSIS_REL = "artifacts/analysis/analysis.json"
@@ -343,8 +344,16 @@ def gate_update(
     worktree: Path | None = None,
     baseline: dict[str, str] | None = None,
 ) -> GateResult:
-    """The update stage must leave at least one non-empty knowledge file behind."""
+    """The update stage must leave at least one non-empty knowledge file behind.
+
+    It also reports a missing `## Contents`, because a knowledge base is only usable if a
+    reader can see what a record holds *before* loading it — and a record with no table of
+    contents is the one nobody opens. That is a **warning**, not a failure: the content may
+    be excellent, and losing a run to a missing heading would repeat the mistake this
+    pipeline already made once with a stricter gate.
+    """
     issues: list[str] = []
+    warnings: list[str] = []
     require_produced(worktree, [UPDATE_REL], baseline, issues, describe=describe_artifact)
     if worktree is not None:
         root = Path(worktree) / "records" / "main"
@@ -354,7 +363,14 @@ def gate_update(
             issues.append(f"no knowledge files under {root}")
         elif not non_empty:
             issues.append(f"every knowledge file under {root} is empty")
-    return GateResult("update", not issues, issues)
+        for path in non_empty:
+            text = path.read_text(encoding="utf-8", errors="replace")
+            if toc_missing(text):
+                warnings.append(
+                    f"{path.name} has no usable `## Contents` block: a reader cannot tell "
+                    "what is inside without loading the whole file"
+                )
+    return GateResult("update", not issues, issues, warnings)
 
 
 def read_analysis(run_dir: Path, worktree: Path | None = None) -> dict[str, Any] | None:

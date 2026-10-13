@@ -1,7 +1,11 @@
-"""Instance synthesis tests for the CVRPTW problem plugin.
+"""Instance synthesis tests for the CVRPTW problem bundle.
 
-These are the problem's own tests: schema, determinism, feasibility of the data
-itself, and the writers. A different variant ships its own file like this.
+These are the problem's own tests: schema, determinism, feasibility of the data itself, and
+the writers. A different variant ships its own file like this one.
+
+The generator and the checker live in the bundle's `grader/` package, so they are imported
+through the loader -- the same path the engine uses -- rather than by module name. That is
+what lets a problem be a directory rather than something on `sys.path`.
 """
 
 from __future__ import annotations
@@ -11,13 +15,23 @@ from pathlib import Path
 
 import pytest
 
-from cvrp.problems.cvrptw.checks import check_solution, distance_matrix, load_instance
-from cvrp.problems.cvrptw.instances import (
-    build_dataset,
-    generate_instance,
-    write_instance_json,
-    write_instance_vrp,
-)
+from cvrp.problems import load_problem
+from tests.conftest import PACKAGE_PROBLEMS
+
+_PLUGIN = load_problem(PACKAGE_PROBLEMS / "cvrptw", slug="cvrptw")
+_GRADER = _PLUGIN.checks_module
+_GEN = _GRADER._build.__module__
+import sys  # noqa: E402
+
+_GENERATOR = sys.modules[_GEN]
+
+check_solution = _GRADER.check_solution
+distance_matrix = _GRADER.distance_matrix
+load_instance = _GRADER.load_instance
+build_dataset = _GENERATOR.build_dataset
+generate_instance = _GENERATOR.generate_instance
+write_instance_json = _GENERATOR.write_instance_json
+write_instance_vrp = _GENERATOR.write_instance_vrp
 
 
 def test_instance_shape_and_index_convention():

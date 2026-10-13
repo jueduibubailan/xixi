@@ -190,7 +190,7 @@ def test_scale_flows_from_the_task_file(scratch: Path):
 def test_the_generator_produces_feasible_instances_at_every_size(size: int):
     import importlib.util
 
-    spec = importlib.util.spec_from_file_location("cvrptw_instances", PROBLEM_DIR / "instances.py")
+    spec = importlib.util.spec_from_file_location("cvrptw_instances", PROBLEM_DIR / "grader" / "cvrptw_gen.py")
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(module)
@@ -207,7 +207,7 @@ def test_large_instances_get_wider_windows():
     """Feasibility at n=100 requires more slack than n=20; the defaults must say so."""
     import importlib.util
 
-    spec = importlib.util.spec_from_file_location("cvrptw_instances2", PROBLEM_DIR / "instances.py")
+    spec = importlib.util.spec_from_file_location("cvrptw_instances2", PROBLEM_DIR / "grader" / "cvrptw_gen.py")
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(module)

@@ -19,7 +19,9 @@ from pathlib import Path
 
 from cvrp.executor.contract import import_probe, py_compile
 from cvrp.problems import load_problem
-from tests.conftest import PACKAGE_PROBLEMS
+from tests.conftest import PACKAGE_PROBLEMS, baseline_of
+
+PROBLEM = load_problem(PACKAGE_PROBLEMS / "cvrptw", slug="cvrptw")
 
 
 def _worktree_with(scratch: Path, files: dict[str, str]) -> Path:
@@ -75,7 +77,7 @@ def test_import_probe_flags_the_upstream_package_prefix(scratch: Path):
 
 def test_import_probe_accepts_a_bootstrapped_path(scratch: Path):
     """Option 1 from the prompt: bootstrap sys.path, then import the real helper."""
-    pomo = PACKAGE_PROBLEMS / "cvrptw" / "pomo"
+    pomo = baseline_of(PROBLEM) / "pomo"
     worktree = _worktree_with(
         scratch,
         {
@@ -93,7 +95,7 @@ def test_import_probe_accepts_a_bootstrapped_path(scratch: Path):
 
 def test_import_probe_accepts_a_copied_helper(scratch: Path, tmp_path_factory=None):
     """Option 2: copy the helper next to the package and import it locally."""
-    helper = (PACKAGE_PROBLEMS / "cvrptw" / "pomo" / "POMO" / "utils" / "utils.py").read_text(
+    helper = (baseline_of(PROBLEM) / "pomo" / "POMO" / "utils" / "utils.py").read_text(
         encoding="utf-8"
     )
     worktree = _worktree_with(
@@ -127,7 +129,7 @@ def test_import_probe_reports_missing_artifacts(scratch: Path):
 
 def test_the_baseline_helper_is_reachable_as_shipped(scratch: Path):
     """The shipped baseline must be importable without the agent doing anything."""
-    pomo = PACKAGE_PROBLEMS / "cvrptw" / "pomo"
+    pomo = baseline_of(PROBLEM) / "pomo"
     worktree = _worktree_with(
         scratch,
         {

@@ -32,7 +32,73 @@
       ],
       "source": "manual",
       "note": "written by hand: the generated train_n100.py crashed on the user's machine, so no pipeline run exists to promote. See the attempts block for the traceback."
+    },
+    {
+      "run_id": "20261013-134335",
+      "outcome": "completed",
+      "at": "2026-10-13T05:43:36Z",
+      "files": [
+        "skills/_global_skill.md",
+        "skills/cvrptw_skill.md",
+        "notes/cvrptw_notes.md",
+        "attempts/cvrptw_attempts.md"
+      ]
+    },
+    {
+      "run_id": "20261013-134336",
+      "outcome": "completed",
+      "at": "2026-10-13T05:43:38Z",
+      "files": [
+        "skills/_global_skill.md",
+        "skills/cvrptw_skill.md",
+        "notes/cvrptw_notes.md",
+        "attempts/cvrptw_attempts.md"
+      ]
+    },
+    {
+      "run_id": "20261013-134610",
+      "outcome": "completed",
+      "at": "2026-10-13T05:46:11Z",
+      "files": [
+        "skills/_global_skill.md",
+        "skills/cvrptw_skill.md",
+        "notes/cvrptw_notes.md",
+        "attempts/cvrptw_attempts.md"
+      ]
+    },
+    {
+      "run_id": "20261013-134748",
+      "outcome": "completed",
+      "at": "2026-10-13T05:47:49Z",
+      "files": [
+        "skills/_global_skill.md",
+        "skills/cvrptw_skill.md",
+        "notes/cvrptw_notes.md",
+        "attempts/cvrptw_attempts.md"
+      ]
+    },
+    {
+      "run_id": "20261013-135322",
+      "outcome": "completed",
+      "at": "2026-10-13T05:53:23Z",
+      "files": [
+        "skills/_global_skill.md",
+        "skills/cvrptw_skill.md",
+        "notes/cvrptw_notes.md",
+        "attempts/cvrptw_attempts.md"
+      ]
+    },
+    {
+      "run_id": "20261013-135324",
+      "outcome": "completed",
+      "at": "2026-10-13T05:53:24Z",
+      "files": [
+        "skills/_global_skill.md",
+        "skills/cvrptw_skill.md",
+        "notes/cvrptw_notes.md",
+        "attempts/cvrptw_attempts.md"
+      ]
     }
   ],
-  "updated_at": "2026-10-12T15:23:23Z"
+  "updated_at": "2026-10-13T05:53:24Z"
 }

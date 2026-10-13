@@ -186,6 +186,33 @@ def test_pipeline_completes_offline(project: Path, monkeypatch: pytest.MonkeyPat
     assert (run_dir / "REPORT.md").is_file()
 
 
+def test_the_pipeline_runs_with_an_empty_knowledge_base(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The contract must not live in the records.
+
+    Moving problem knowledge out of the prompts and into the knowledge base is only safe
+    while the *contract* — file naming, the first-line marker, the parameter values — stays
+    in the prompt. If any of it moved, the first run of a new problem (empty `records/`)
+    would have nothing to hold the deliverable to, and this test would fail.
+    """
+    monkeypatch.chdir(project)
+    config = load_config(project / "task.yaml", cwd=project)
+    # point the knowledge base somewhere empty: a first run for a brand-new problem
+    config["records"] = dict(config.get("records") or {}, dir=str(project / "no-records-yet"))
+
+    result = start(config, results_dir=project / "results")
+    assert result["success"], json.dumps(result["state"]["stages"], indent=2)[:2000]
+
+    state = result["state"]
+    assert state["stages"]["retrieval"]["status"] == "done"
+    assert "empty" in str(state["stages"]["retrieval"]["message"])
+    # the run proceeded through the gates the contract protects, and only then wrote a
+    # knowledge base of its own for the next run to find
+    assert state["stages"]["code_error"]["status"] == "done"
+    assert (project / "no-records-yet" / "main").is_dir()
+
+
 def test_analysis_payload_comes_from_the_problem(project: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.chdir(project)
     config = load_config(project / "task.yaml", cwd=project)

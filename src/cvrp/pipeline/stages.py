@@ -102,11 +102,15 @@ def _render(template: str, variables: dict[str, str]) -> str:
     return combined.sub(_dispatch, template)
 
 
-# Mapping from stage name to the key the problem uses for that prompt.
+# Mapping from stage name to the prompt basename used by the shared pack and by any
+# per-problem `prompts:` override. Every agent stage appears here, so a problem that
+# declares no `prompts:` at all still gets the engine's default for each one.
 STAGE_PROMPT_KEYS = {
-    "analysis": "analysis",
-    "code_generation": "codegen",
-    "code_revise": "revise",
+    "retrieval": "s0_retrieval",
+    "analysis": "s1_analysis",
+    "code_generation": "s2_codegen",
+    "code_revise": "s4_revise",
+    "update": "s7_update",
 }
 
 
@@ -309,26 +313,44 @@ def _records_section(stage_config: dict[str, Any], config: dict[str, Any]) -> st
             return "\n".join(lines)
         description = str(((config.get("task") or {}).get("description") or ""))
         ranked = candidates(config, description)
+        general = [item for item in files if str(item.get("tier")) == "general"]
+        scoped = [item for item in files if str(item.get("tier")) != "general"]
         lines += [
             f"The knowledge base is `{root}`. **Read every file below in full** before",
             "selecting anything -- the ranking is a lexical hint, not a decision, and a file",
             "can be relevant with a score of 0.",
             "",
-            "## What exists",
+            "Each entry lists what that record says is inside it (its own `## Contents`).",
+            "Use those to decide what to load, and read the whole file for whatever you",
+            "select -- a section list is a map, not a substitute.",
             "",
         ]
-        lines += [
-            f"- `{root / item['path'].split('main/', 1)[-1]}` ({item['bytes']} B)"
-            if item["path"].startswith("main/")
-            else f"- `{item['path']}` ({item['bytes']} B)"
-            for item in files
-        ]
+        if general:
+            lines += [
+                "## General records (hold for any problem; always worth reading)",
+                "",
+            ]
+            for item in general:
+                lines.append(f"- `{item['path']}` ({item['bytes']} B, general)")
+                for entry in item.get("toc") or []:
+                    lines.append(f"    {entry}")
+            lines.append("")
+        if scoped:
+            lines += ["## Records for a specific problem", ""]
+            for item in scoped:
+                lines.append(f"- `{item['path']}` ({item['bytes']} B)")
+                for entry in item.get("toc") or []:
+                    lines.append(f"    {entry}")
+            if any(not (item.get("toc") or []) for item in scoped):
+                lines += [
+                    "",
+                    "_(a record without a Contents list is one whose author did not say what",
+                    "is inside; read it anyway if the problem looks related)_",
+                ]
         lines += ["", "## Ranked as most similar to this problem description", ""]
         for item in ranked:
             matched = ", ".join(item["matched"]) or "(no lexical overlap)"
             lines.append(f"- `{item['path']}` (score {item['score']}; matched: {matched})")
-            for key in item.get("key_lines", [])[:24]:
-                lines.append(f"    {key}")
         return "\n".join(lines)
 
     # analysis: the retrieval stage's output, staged read-only for this stage

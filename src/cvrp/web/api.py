@@ -21,24 +21,6 @@ from cvrp.run.state import RunState
 TEXT_SUFFIXES = {".md", ".txt", ".log", ".json", ".py", ".yaml", ".yml", ".csv"}
 MAX_TEXT_BYTES = 400_000
 
-# artifact locations, used by /api/stages to attach statuses
-STAGE_ARTIFACTS = {
-    "retrieval": [
-        "artifacts/records/retrieval.json",
-        "artifacts/records/description_parsing.json",
-    ],
-    "analysis": ["artifacts/analysis/analysis.json", "artifacts/analysis/plan.md"],
-    "code_generation": ["artifacts/generated"],
-    "code_error": [
-        "artifacts/runs/s3_run_report.json",
-        "artifacts/runs/s3_full_run.stdout.txt",
-        "artifacts/runs/s3_error_narrative.json",
-    ],
-    "code_revise": ["artifacts/revisions"],
-    "feasibility": ["artifacts/runs/s5_feasibility.json"],
-    "update": ["records/main"],
-}
-
 
 class RunContext:
     """Where the dashboard reads from."""
@@ -159,10 +141,17 @@ async def get_stages(request: Request) -> Response:
     for stage_config in context.config.get("stages", []):
         name = stage_config["name"]
         record = dict(records.get(name) or {"name": name, "status": "pending"})
+        # `kind` is the execution mechanism, `does` is the label the UI shows. They differ
+        # only for `code_error`, which is a deterministic executor that also spends one
+        # model turn narrating a failure. Both are sent so the payload stays honest.
         record["kind"] = stage_config.get("kind", "agent")
+        record["does"] = stage_config.get("does") or record["kind"]
         record["produces"] = stage_config.get("produces") or []
         present: list[str] = []
-        for relative in STAGE_ARTIFACTS.get(name, stage_config.get("produces") or []):
+        # Read the stage's own declared outputs. There used to be a second table here, which
+        # drifted from `produces` and listed conditional files as if they were always
+        # produced -- so a healthy run could show them as missing.
+        for relative in stage_config.get("produces") or []:
             if (run_dir / relative).exists():
                 present.append(relative)
         record["present"] = present
@@ -242,6 +231,7 @@ async def get_records(request: Request) -> Response:
         "main": [],
         "run": [],
         "areas": {},
+        "tiers": {},
         "problem": tag_of(config.get("_problem")),
     }
 
@@ -269,12 +259,17 @@ async def get_records(request: Request) -> Response:
             continue
         relative = raw[len("main/") :]
         payload["areas"][area] = payload["areas"].get(area, 0) + 1
+        tier = str(item.get("tier") or "scoped")
+        payload["tiers"][tier] = payload["tiers"].get(tier, 0) + 1
         payload["main"].append(
             {
                 "path": item.get("path"),
                 "area": area,
+                "tier": tier,
                 "bytes": item.get("bytes"),
-                "headings": item.get("headings") or [],
+                # The record's own contents list: the panel shows it so a reader can tell
+                # what is inside without opening every file.
+                "toc": item.get("toc") or [],
                 "from_this_run": bool(relative and relative in contributed),
             }
         )

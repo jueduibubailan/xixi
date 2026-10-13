@@ -1,0 +1,17 @@
+{
+  "problem": "counting",
+  "instances": [
+    {
+      "path": "n20/counting_n20_00.json",
+      "problem_size": 20,
+      "name": "counting_n20_3234",
+      "seed": 3234
+    },
+    {
+      "path": "n20/counting_n20_01.json",
+      "problem_size": 20,
+      "name": "counting_n20_3235",
+      "seed": 3235
+    }
+  ]
+}

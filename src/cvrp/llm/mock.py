@@ -457,16 +457,32 @@ class MockBackend(LLMBackend):
                 found = {}
         del records_dir
 
-        (root / "skills" / f"{tag}_skill.md").write_text(
-            f"# Skill — {tag} (offline stub)\n\n"
-            "## Environment & deps\n\n"
-            "- The executor runs the generated program with this project's interpreter.\n"
-            "- `torch`, `numpy`, `pytz` and `matplotlib` are installed; `workspace.setup`\n"
-            "  pins the install and is fingerprinted.\n\n"
+        # Offline records, written in the real convention: a `## Contents` block first
+        # (the merge guard refuses a file without one -- it would be a stub, not a record),
+        # and `_global_skill.md` holding only what is true for any problem.
+        (root / "skills" / "_global_skill.md").write_text(
+            "# Global skill (offline stub)\n\n"
+            "> Scope: **general**. Written by `llm.backend: mock`; it contains no measured\n"
+            "> findings, only the pipeline's own invariants.\n\n"
+            "## Contents\n\n"
+            "- `Verification playbook` — the gate order *(general)*\n\n"
             "## Verification playbook\n\n"
             "- Five gates run in order: `py_compile`, `import_probe`, `correspondence`,\n"
             "  `smoke_run`, `full_run`.\n"
-            "- Reproduce one stage with `cvrp stage <name>` rather than re-running the run.\n\n"
+            "- Reproduce one stage with `cvrp stage <name>` rather than re-running the run.\n",
+            encoding="utf-8",
+        )
+        (root / "skills" / f"{tag}_skill.md").write_text(
+            f"# Skill — {tag} (offline stub)\n\n"
+            f"> Scope: **problem-specific**. Written by `llm.backend: mock`, which does not\n"
+            f"> exercise the real solver; treat every claim as unverified.\n\n"
+            "## Contents\n\n"
+            "- `Verification playbook` — which gate to reproduce *(problem-specific)*\n"
+            "- `Proven fixes` — empty until a real run fills it *(problem-specific)*\n\n"
+            "## Verification playbook\n\n"
+            "- The executor runs the generated program with this project's interpreter.\n"
+            "- Five gates run in order: `py_compile`, `import_probe`, `correspondence`,\n"
+            "  `smoke_run`, `full_run`.\n\n"
             "## Proven fixes\n\n"
             "_Nothing yet: this file was written by `llm.backend: mock`, which does not\n"
             "exercise the real solver._\n",
@@ -474,6 +490,10 @@ class MockBackend(LLMBackend):
         )
         (root / "notes" / f"{tag}_notes.md").write_text(
             f"# Notes — {tag} (offline stub)\n\n"
+            f"> Scope: **problem-specific**. Written by `llm.backend: mock`.\n\n"
+            "## Contents\n\n"
+            "- `Identity` — tag and scale *(problem-specific)*\n"
+            "- `Traps` — empty until a real run fills it *(problem-specific)*\n\n"
             "## Identity\n\n"
             f"- problem tag: `{tag}`\n"
             f"- scale: n={self.problem.problem_size if self.problem else '?'}\n\n"
@@ -482,6 +502,12 @@ class MockBackend(LLMBackend):
             encoding="utf-8",
         )
         blocks = [
+            f"# Attempts — {tag} (offline stub)\n",
+            "> Scope: **problem-specific**. Newest last; find one with"
+            " `grep -n '^## '`.\n",
+            "## Contents\n",
+            "- `Blocks` — one section per run, appended *(problem-specific)*\n",
+            "## Blocks\n",
             f"## {run_id} · n={self.problem.problem_size if self.problem else '?'} · offline",
             "- task: run with `llm.backend: mock`",
             f"- records found: {', '.join(sorted(found)) or 'none'}",
@@ -489,12 +515,13 @@ class MockBackend(LLMBackend):
             "- lessons: none from an offline run; see a real backend's attempt block",
         ]
         (root / "attempts" / f"{tag}_attempts.md").write_text(
-            f"# Attempts — {tag}\n\n" + "\n".join(blocks) + "\n", encoding="utf-8"
+            "\n".join(blocks) + "\n", encoding="utf-8"
         )
         return {
             "status": "ok",
             "summary": "offline knowledge stub written",
             "files": [
+                "records/main/skills/_global_skill.md",
                 f"records/main/skills/{tag}_skill.md",
                 f"records/main/notes/{tag}_notes.md",
                 f"records/main/attempts/{tag}_attempts.md",

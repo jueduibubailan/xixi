@@ -31,6 +31,30 @@ from typing import Any
 
 from cvrp.executor.contract import StepResult, locate_artifact, stage_search_paths
 
+
+def _baseline_root(problem: Any | None) -> Path | None:
+    """Where `pomo/...` lives, as the correspondence table addresses it.
+
+    Resolved from `resources.baseline_dir` with the same rules the worktree seeder uses, so
+    the checker and the seeder cannot disagree about what "the staged baseline" is. A bundle
+    keeps its baseline in `seed/`; looking for `pomo/...` under the problem root instead of
+    under that directory reported every deliverable as pointing outside the baseline.
+    """
+    if problem is None:
+        return None
+    raw = str(
+        ((getattr(problem, "spec", {}) or {}).get("resources") or {}).get("baseline_dir") or ""
+    )
+    if raw:
+        candidate = Path(raw).expanduser()
+        if not candidate.is_absolute():
+            candidate = Path(getattr(problem, "root", ".")) / candidate
+        if candidate.is_dir():
+            return candidate
+    root = getattr(problem, "root", None)
+    return Path(root) if root else None
+
+
 CORRESPONDENCE_LINE = "# baseline-correspondence:"
 _CORRESPONDENCE_RE = re.compile(r"^#\s*baseline-correspondence:\s*(\S+)\s*$")
 
@@ -189,8 +213,7 @@ def check_correspondence(
 
     # 3. each declared link points at the entry the table names, and it exists
     if problem is not None:
-        pomo_root = getattr(problem, "root", None)
-        pomo_root = Path(pomo_root) if pomo_root else None
+        pomo_root = _baseline_root(problem)
         for name, source in sorted(table.items()):
             if source is None or name not in delivered:
                 continue
@@ -244,11 +267,14 @@ def _check_plot_styles(
     """
     style_root = None
     if problem is not None:
-        candidate = (
-            Path(getattr(problem, "root", "")) / "pomo" / "POMO" / "utils" / "log_image_style"
-        )
-        if candidate.is_dir():
-            style_root = candidate
+        # Relative to the baseline directory, which is where the generated code will look
+        # too: `utils.py` resolves the style next to itself, and the deliverable imports it
+        # from the staged baseline.
+        baseline = _baseline_root(problem)
+        if baseline is not None:
+            candidate = baseline / "pomo" / "POMO" / "utils" / "log_image_style"
+            if candidate.is_dir():
+                style_root = candidate
     if style_root is None:
         return
     available = sorted(path.name for path in style_root.glob("*.json"))

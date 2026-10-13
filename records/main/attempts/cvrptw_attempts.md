@@ -1,5 +1,25 @@
 # Attempts — cvrptw
 
+> Scope: **problem-specific**. One block per run, appended, newest last. Blocks are keyed by
+> run id, so the fastest way to find one is to grep for it:
+> `grep -n '^## ' attempts/cvrptw_attempts.md`. Run ids also appear in
+> `records/main/index.json`, which records which files each run contributed.
+> A block written by hand rather than by the update stage carries `source: manual run`.
+
+## Contents
+
+- `How to read these` — block layout, keying and retention *(general)*
+- `Blocks` — one `## <run_id> · n=… · <outcome>` section per run, appended *(problem-specific)*
+
+## How to read these
+
+Every block opens with `## <run_id> · n=<scale> · <outcome> · rounds=<k> · source: <pipeline|manual run>`
+and then states: what was asked, what the generation wrote, what failed (with the evidence),
+what was revised, the outcome, and the lessons. Blocks are never rewritten — a later run
+appends. The most recent blocks are the most likely to reflect the current code.
+
+## Blocks
+
 ## 20261012-231939 · n=100 · FAILED (crash) · rounds=0 · source: manual run
 
 - **task**: `CVRPTW-n100-on-POMO`; generated package executed directly by the user, *not*

@@ -29,6 +29,23 @@ from tests.conftest import PACKAGE_PROBLEMS
 
 PROBLEM = load_problem(PACKAGE_PROBLEMS / "cvrptw", slug="cvrptw")
 
+
+def _baseline() -> Path:
+    """The bundle's baseline directory, as `resources.baseline_dir` resolves it.
+
+    A problem bundle keeps its reference implementation in `seed/`; the correspondence table
+    addresses it as `pomo/...` relative to that. Reading the spec instead of hardcoding the
+    path means a problem can move its baseline without touching tests.
+    """
+    raw = str((PROBLEM.spec.get("resources") or {}).get("baseline_dir") or ".")
+    return PROBLEM.root / raw
+
+
+def _styles() -> Path:
+    """The plotting-style directory inside the bundle's baseline."""
+    return _baseline() / "pomo" / "POMO" / "utils" / "log_image_style"
+
+
 TRAIN_PARAMS = """\
 # baseline-correspondence: pomo/POMO/train_n100.py
 trainer_params = {
@@ -285,12 +302,15 @@ def test_the_correspondence_table_is_complete_and_real():
     files = set(PROBLEM.spec["generated"]["files"])
     assert set(table) == files, "the table and the file list must agree"
 
-    pomo_root = PROBLEM.root / "pomo"
+    baseline = _baseline()
     for name, source in table.items():
         if source is None:
             assert name in {"run.py", "README.md"}
             continue
-        assert (pomo_root / Path(source).relative_to("pomo")).is_file(), f"{name} -> {source} is not in the baseline"
+        # The table addresses the baseline the way the worktree lays it out, so the path is
+        # used as-is: `resources.baseline_dir` already points at the directory that holds
+        # `pomo/`, which is exactly what the generated code's first line names.
+        assert (baseline / source).is_file(), f"{name} -> {source} is not in the baseline"
 
 
 def test_the_deliverable_is_named_after_the_problem():
@@ -304,7 +324,7 @@ def test_the_deliverable_is_named_after_the_problem():
 
 def test_the_plotting_styles_ship_with_the_baseline():
     """`utils.py` reads these relative to itself, so they must be in the payload."""
-    styles = PROBLEM.root / "pomo" / "POMO" / "utils" / "log_image_style"
+    styles = _styles()
     assert (styles / "style_cvrp_20.json").is_file()
     assert (styles / "style_loss_1.json").is_file()
 
@@ -375,7 +395,7 @@ def test_the_baseline_style_names_are_shipped_and_do_not_clip(scratch: Path):
 
 def test_a_pinned_upper_bound_is_flagged(scratch: Path):
     """A hardcoded `max` clips the curve into an empty-looking figure, not an error."""
-    style_dir = PROBLEM.root / "pomo" / "POMO" / "utils" / "log_image_style"
+    style_dir = _styles()
     victim = style_dir / "style_cvrp_20.json"
     original = victim.read_text(encoding="utf-8")
     victim.write_text(
@@ -431,7 +451,7 @@ def test_the_shipped_objective_style_autoscales_its_y_axis():
     """
     import json
 
-    styles = PROBLEM.root / "pomo" / "POMO" / "utils" / "log_image_style"
+    styles = _styles()
     objective = json.loads((styles / "style_cvrp_20.json").read_text(encoding="utf-8"))
     loss = json.loads((styles / "style_loss_1.json").read_text(encoding="utf-8"))
 

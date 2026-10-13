@@ -1,0 +1,44 @@
+{
+  "problem": "counter",
+  "empty": false,
+  "selected": [
+    {
+      "source": "main/attempts/cvrptw_attempts.md",
+      "area": "attempts",
+      "why": "offline backend selects every available record verbatim",
+      "reuse": [
+        "selected verbatim"
+      ],
+      "sections": "all"
+    },
+    {
+      "source": "main/notes/cvrptw_notes.md",
+      "area": "notes",
+      "why": "offline backend selects every available record verbatim",
+      "reuse": [
+        "selected verbatim"
+      ],
+      "sections": "all"
+    },
+    {
+      "source": "main/skills/_global_skill.md",
+      "area": "skills",
+      "why": "offline backend selects every available record verbatim",
+      "reuse": [
+        "selected verbatim"
+      ],
+      "sections": "all"
+    },
+    {
+      "source": "main/skills/cvrptw_skill.md",
+      "area": "skills",
+      "why": "offline backend selects every available record verbatim",
+      "reuse": [
+        "selected verbatim"
+      ],
+      "sections": "all"
+    }
+  ],
+  "rejected": [],
+  "notes": "offline backend: relevance was not judged; every record was copied"
+}
