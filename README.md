@@ -68,23 +68,119 @@ turn is optional and is **skipped entirely on a clean pass**. The dashboard ther
 
 ## Quick start
 
+Common to both tracks:
+
 ```bash
 uv sync --extra dev
 
 # generate the selected problem's data (also happens automatically on `start`)
 uv run cvrp instances
 
-# run the whole pipeline
-uv run cvrp start task.yaml
-
-# watch it
+# watch a run
 uv run cvrp ui               # http://127.0.0.1:8420
 ```
 
-Driving the agents requires the Claude Code CLI on `PATH`, logged in as the model you want.
-`task.yaml` ships with `llm.model: deepseek-flash`; change it in the config, not in the code.
+Then pick the track that matches your machine. Both drive the same pipeline; they differ only
+in which agent runtime launches the model turns.
 
-### Offline smoke test
+### Track A — Linux + Claude Code (the verified path)
+
+This is the track the project was developed and run against end to end.
+
+```bash
+# the agent runtime
+npm install --global @anthropic-ai/claude-code    # provides `claude` on PATH
+claude --version
+```
+
+Credentials and routing come from the shell. `task.yaml` ships with
+`llm.model: deepseek-flash`, which is not an Anthropic model name, so it only works when
+`ANTHROPIC_BASE_URL` points at a router that serves it:
+
+```bash
+export ANTHROPIC_BASE_URL=https://your-router.example/v1
+export ANTHROPIC_AUTH_TOKEN=...        # or ANTHROPIC_API_KEY
+```
+
+`llm.inherit_routing_env: true` (the default) is what lets those variables reach the child;
+the engine strips only Claude's own session markers, never your routing setup.
+
+```bash
+uv run cvrp start task.yaml            # n=20: the fastest end-to-end signal
+uv run cvrp doctor                     # checks CLI, routing, data and prompts
+```
+
+Config shape:
+
+```yaml
+llm:
+  backend: "claude_code"
+  runtime: "claude_code"
+  model: "deepseek-flash"
+  claude_bin: "claude"        # or an absolute path
+  permission_mode: "auto"     # Claude Code's vocabulary
+  inherit_routing_env: true
+```
+
+### Track B — Windows + DeepSeek Harness (`dsh`)
+
+`dsh` is a different launcher with different flags and its own sandbox. Four things about it
+cost real debugging time, so they are stated up front; the code already handles all four.
+
+```powershell
+# 1. the runtime
+npm install --global @deepseek-ai/dsh
+dsh --version
+
+# 2. the credential -- this is the step people miss
+$env:DEEPSEEK_API_KEY = "sk-..."        # must be in the shell that launches `cvrp`
+```
+
+`dsh_home` defaults to `.dsh` **inside the run directory**, so each run gets isolated session
+state. The consequence worth knowing: your global store at `~/.dsh/.credentials.yaml` is
+**not** consulted, and pointing `dsh_home` at `~/.dsh` does not work either, because the
+sandbox refuses writes outside the workspace. Export the environment variable instead.
+
+```powershell
+uv run cvrp start task.yaml             # n=20 first, not n=100
+```
+
+Config shape:
+
+```yaml
+llm:
+  backend: "dsh"
+  runtime: "dsh"
+  dsh_bin: "dsh"
+  dsh_home: ".dsh"              # run-local: isolated, and inside the workspace
+  inherit_routing_env: true     # passes DEEPSEEK_API_KEY through
+  timeout_seconds: 3600
+  runtime_options:
+    profile: "headless"
+    permission_mode: "workspace-write"   # DSH's vocabulary, not Claude Code's
+    tools_mode: "native"
+    patch: []                   # a --patch overlay is how you change the model
+```
+
+**The four things that bite on Windows**, and what the engine does about each:
+
+| symptom | cause | how it is handled |
+|---|---|---|
+| `命令行太长。` ("command line is too long") | on Windows `dsh` resolves to `dsh.CMD`, which runs through `cmd.exe`, whose command line caps at **8191** characters — while a rendered stage instruction is 11k–38k | the instruction is **piped on stdin**, which `headless` documents (`echo "task" \| dsh --profile headless`). The argv is `dsh --profile headless`, 22 characters |
+| `error: unknown option '--model'` | `--model` is not a `dsh` flag; the model is a profile setting | the model is never put on the command line. It is recorded in the log header and set through the profile or a `--patch` overlay |
+| `sandbox-policy: ... expected "read-only" \| "workspace-write" \| "danger-full-access" but got "auto"`, then `9 entries did not activate` | the two runtimes do not share a `permission_mode` vocabulary. This repo invokes Claude Code with `auto`; DSH accepts only the three values its own validation error names | set DSH's value under `runtime_options.permission_mode`, which takes precedence over `llm.permission_mode`. **Do not leave it at `auto`**: the agent then starts with **no tools at all** and fails later for an unrelated-looking reason |
+| `spill-local: EPERM ... mkdtemp '%TEMP%\dsh-spill-XXXXXX'` then `1 entry did not activate` | DSH's file sandbox forbids writes outside the workspace, but its `spill-local` plugin creates a private root under the OS temp dir | the child's `TMPDIR`/`TMP`/`TEMP` are redirected to `<DSH_HOME>/tmp`, inside the run. Disable with `llm.redirect_temp: false` |
+
+Two more differences from Track A, both easy to trip over:
+
+* **the model string differs.** Claude Code takes `deepseek-flash` through a router; DSH has no
+  `--model` flag at all, so the value is informational unless you set it in the profile. The
+  header line `# model: ...` tells you what the pipeline asked for.
+* **`llm.permission_mode` cannot serve both tracks.** Keep `auto` for Track A and put DSH's
+  value in `runtime_options.permission_mode`; that is what makes one `task.yaml` usable from
+  either platform.
+
+### Offline smoke test (both tracks)
 
 ```bash
 uv run cvrp start task.yaml llm.backend=mock records.dir=./records-smoke \
@@ -93,7 +189,7 @@ uv run cvrp start task.yaml llm.backend=mock records.dir=./records-smoke \
 
 The mock backend emits the problem's `mock.template` — a small but genuinely runnable solver —
 and the problem's `mock.analysis` payload, so the acceptance contract and the feasibility
-checker are exercised for real without a model.
+checker are exercised for real without a model, and without any of the setup above.
 
 Pass a scratch `records.dir` and `workspace.results_dir`: an offline run writes to `records/`
 by default, and the curated knowledge base is not a scratch space.
@@ -226,9 +322,21 @@ the stage-by-stage data flow, `docs/new_problem.md` for the variant-authoring wa
 
 ## Runtimes
 
-| `llm.backend` | status |
-|---|---|
-| `claude_code` (default) | verified end to end on a Linux host |
-| `coral` | same contract, delegating to CORAL's runtime when importable |
-| `mock` | offline: no model, exercises the whole pipeline |
-| `dsh` (DeepSeek Harness) | implemented and unit-tested, **not usable on Windows** — the rendered instruction is passed as argv and exceeds the 32767-character command-line limit, so the process is rejected before it starts. It is not the working backend of any shipped bundle. |
+| `llm.backend` | platform | status |
+|---|---|---|
+| `claude_code` (default) | Linux | **verified end to end** — the reference track |
+| `claude_code` | Windows | implemented, not exercised here; the argv carries the instruction, so very large prompts approach `cmd.exe`'s limit (Track B exists for a reason) |
+| `dsh` (DeepSeek Harness) | Windows | **works**, with the setup in Track B: task on stdin, model not on the argv, `runtime_options.permission_mode`, temp inside the run, `DEEPSEEK_API_KEY` exported |
+| `dsh` | Linux | implemented; the stdin delivery and flag handling are platform-independent |
+| `coral` | any | same contract, delegating to CORAL's runtime when it is importable |
+| `mock` | any | offline: no model, exercises the whole pipeline |
+
+The runtime is a property of the task, not of the code: `llm.backend` selects it and nothing
+under `src/cvrp/` branches on a variant. Switching a task between Track A and Track B is a
+`llm:` edit, and `runtime_options.*` is how a setting that only one runtime understands is
+kept out of the other's way.
+
+A preflight would be kinder than the failures above — the credential and the
+`permission_mode` value can both be checked before a run starts, instead of surfacing as a
+failed agent turn after the first stage has been paid for. That is not implemented yet;
+`uv run cvrp doctor` is the closest thing today.

@@ -22,11 +22,24 @@ scale:
 
 stages: default
 
+# llm:
+#   backend: "claude_code"    # claude_code | coral | dsh | mock
+#   model: "deepseek-flash"
+#   inherit_routing_env: true
+#   timeout_seconds: 3600
 llm:
-  backend: "claude_code"    # claude_code | coral | dsh | mock
-  model: "deepseek-flash"
-  inherit_routing_env: true
+  backend: "dsh"
+  runtime: "dsh"
+  dsh_bin: "dsh"
+  dsh_home: ".dsh"
+  inherit_routing_env: true      # 让 DEEPSEEK_API_KEY 被继承
   timeout_seconds: 3600
+  runtime_options:
+    profile: "headless"
+    permission_mode: "workspace-write"
+    tools_mode: "native"
+    patch: []                    # 要换模型就写 patch 文件的路径
+  # 注意：model 字段保留但不生效——dsh 没有 --model flag
 
 workspace:
   results_dir: "./results"
