@@ -1,0 +1,112 @@
+{
+  "problem_type": "CVRPLTW",
+  "problem_size": 50,
+  "pomo_size": 50,
+  "aug_factor": 8,
+  "objective": "Minimise total Euclidean route distance over all vehicles. Travel time equals distance (speed 1), so the clock and the length are the same quantity up to waiting.",
+  "constraints": [
+    "every customer served exactly once across all routes",
+    "sum of demand on a route <= capacity 40",
+    "arrival at a customer <= its tw_end; early arrival waits until tw_start; service takes 0.2",
+    "every route's total Euclidean length, depot legs included, <= route_limit 3.0",
+    "every route starts and ends at the depot; the vehicle must be back by depot_end 3.0"
+  ],
+  "state_variables": [
+    {"name": "visited", "type": "bool[n]", "meaning": "customers already served on the current route"},
+    {"name": "load", "type": "float", "meaning": "demand carried on the current route, against capacity 40"},
+    {"name": "current_time", "type": "float", "meaning": "clock along the route: max(arrival, tw_start) + 0.2"},
+    {"name": "current_length", "type": "float", "meaning": "Euclidean length driven so far on the current route"},
+    {"name": "current_node", "type": "int", "meaning": "last node of the partial route; 0 is the depot"}
+  ],
+  "masking_rules": [
+    {
+      "name": "unvisited",
+      "condition": "a customer that is already served on this route, or at all, cannot be selected again"
+    },
+    {
+      "name": "capacity",
+      "condition": "load + demand[j] <= 40 for the candidate j"
+    },
+    {
+      "name": "time_window",
+      "condition": "max(current_time + d(i,j), tw_start[j]) <= tw_end[j]; a late arrival is infeasible, an early one waits"
+    },
+    {
+      "name": "route_limit",
+      "condition": "current_length + d(i,j) + d(j,0) <= 3.0, so the route can still return to the depot"
+    },
+    {
+      "name": "return_by_horizon",
+      "condition": "max(current_time + d(i,j), tw_start[j]) + 0.2 + d(j,0) <= 3.0"
+    },
+    {
+      "name": "depot_always_allowed",
+      "condition": "node 0 is never masked, so a state with no legal customer stays escapable"
+    }
+  ],
+  "feasibility_checklist": [
+    "after every insertion, confirm the vehicle can still return to the depot within 3.0",
+    "confirm the sum of distances along the route (depot legs included) is <= 3.0",
+    "confirm no customer is skipped and none is served twice",
+    "confirm the routes are written with depot legs: each starts and ends with 0"
+  ],
+  "pomo_modification_plan": [
+    {
+      "file": "pomo/POMO/CVRPEnv.py",
+      "symbol": "CVRPEnv._get_mask",
+      "change": "replace the capacity-only mask with the five masks above, including the route-limit and return-by-horizon lookaheads that use the return leg to the depot"
+    },
+    {
+      "file": "pomo/POMO/CVRPEnv.py",
+      "symbol": "CVRPEnv.step",
+      "change": "carry current_time and current_length per rollout; advance time by max(arrival, tw_start) + 0.2 and length by the Euclidean leg"
+    },
+    {
+      "file": "pomo/POMO/CVRPModel.py",
+      "symbol": "CVRPModel",
+      "change": "leave the architecture unchanged; the checkpoint pins the encoder input width"
+    },
+    {
+      "file": "pomo/POMO/CVRPTrainer.py",
+      "symbol": "CVRPTrainer",
+      "change": "none for the training schedule; the variant lives in the environment"
+    }
+  ],
+  "run_plan": [
+    {
+      "file": "CVRPLTW50Env.py",
+      "symbol": "CVRPLTW50Env._get_mask",
+      "check": "five masks exist: unvisited, capacity, time window, route limit, return-by-horizon; the depot is never masked"
+    },
+    {
+      "file": "CVRPLTW50Env.py",
+      "symbol": "CVRPLTW50Env.step",
+      "check": "current_time and current_length are updated per rollout from the instance values, not from constants"
+    },
+    {
+      "file": "CVRPLTW50ProblemDef.py",
+      "symbol": "get_random_problems",
+      "check": "the training generator reads capacity, route limit and service time from the instance instead of hard-coding them"
+    },
+    {
+      "command": "python run.py --path data/instances/n50 --iteration 10 --save-solution /tmp/out.json",
+      "check": "prints both contract lines and writes routes whose length each stay within 3.0"
+    }
+  ],
+  "output_contract": {
+    "initial_cost_regex": "the initial process is successful, the initial cost is (\\d+(?:\\.\\d+)?)",
+    "best_cost_regex": "the process is successful, the best cost is (\\d+(?:\\.\\d+)?)",
+    "solution_dump": "{\"routes\": [[0, ...], ...], \"cost\": <float>}"
+  },
+  "recommended_approach": "Keep POMO's encoder and training loop. Move the variant into the environment: five masks (unvisited, capacity, time window, route limit, return-by-horizon) with the depot never masked, and carry the clock and the length as per-rollout state. The instance set is MVMoE's, so capacity 40, route limit 3.0 and service 0.2 must be read from the instance, not hard-coded.",
+  "risks": [
+    "symmetrising or ignoring the depot return leg: a route that looks legal forward is often illegal once the return is added",
+    "hard-coding capacity or the route limit instead of reading them from the instance",
+    "masking the depot, which makes a dead-end state unescapable and shows up as a crash rather than a bad solution",
+    "tuning the training budget away from POMO's, which would invalidate the comparison with MVMoE"
+  ],
+  "related_knowledge": {
+    "used": [],
+    "note": "This offline payload reads no records, and says so rather than inventing a citation."
+  }
+}

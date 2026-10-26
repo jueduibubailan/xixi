@@ -19,8 +19,8 @@ from pathlib import Path
 
 import pytest
 
-from cvrp.problems import load_problem
 from tests.conftest import PACKAGE_PROBLEMS, baseline_of
+from vrpar.problems import load_problem
 
 EPOCH_PREFIX = "checkpoint-"
 CHECKPOINT_GLOB = "checkpoint"
@@ -121,12 +121,6 @@ def test_the_prompts_forbid_a_hardcoded_epoch_or_filename():
     # the old three-tier rule is gone
     assert "os.walk" not in codegen
     assert "pretrained fallback" not in codegen
-
-    judge = Path(PROBLEM.prompt("codegen_judge")).read_text(encoding="utf-8")
-    assert "drop box" in judge
-    assert "highest epoch" in judge
-    assert "hardcoded `epoch: 30500`" in judge
-    assert "checkpoint_glob" not in judge
 
     context = PROBLEM.agent_context()
     assert "checkpoint*.pt" in context

@@ -18,7 +18,10 @@ SCRATCH_ROOT = PROJECT_ROOT / ".test-tmp"
 #: test imports because it is what the test body wants -- the *problem*, not where it lives.
 PACKAGE_PROBLEMS = PROJECT_ROOT / "problems"
 #: The engine's own package, for the loader tests.
-LOADER_PACKAGE = PROJECT_ROOT / "src" / "cvrp" / "problems"
+LOADER_PACKAGE = PROJECT_ROOT / "src" / "vrpar" / "problems"
+#: The shared baseline every problem adapts (POMO + the CVRP100 checkpoint). It lives at
+#: the project root, not inside a bundle, so a scratch project needs its own copy.
+PACKAGE_BASELINE = PROJECT_ROOT / "baseline"
 
 
 @pytest.fixture()
@@ -34,12 +37,20 @@ def scratch(request) -> Path:
 def baseline_of(problem) -> Path:
     """The directory ``resources.baseline_dir`` resolves to, for a loaded problem.
 
-    A bundle keeps its reference implementation in ``seed/`` and addresses it as
-    ``pomo/...`` relative to that. Tests that need to poke at the baseline go through here
-    rather than hardcoding ``<root>/pomo``, so moving it is a one-line change.
+    Mirrors `vrpar.run.worktree._resolve_baseline`: the problem directory first, then the
+    project root. The shared baseline lives at the project root, so most problems resolve
+    there; a problem that ships its own baseline still wins. Tests go through here rather
+    than hardcoding a path, so moving the baseline is a one-line change.
     """
     raw = str((problem.spec.get("resources") or {}).get("baseline_dir") or ".")
-    return Path(problem.root) / raw
+    candidate = Path(raw)
+    if candidate.is_absolute():
+        return candidate
+    for base in (Path(problem.root), PROJECT_ROOT):
+        resolved = base / candidate
+        if resolved.is_dir():
+            return resolved
+    return Path(problem.root) / candidate
 
 
 def install_problem(project: Path, slug: str = "cvrptw") -> Path:
@@ -56,6 +67,17 @@ def install_problem(project: Path, slug: str = "cvrptw") -> Path:
     target = Path(project) / "problems" / slug
     shutil.rmtree(target, ignore_errors=True)
     shutil.copytree(source, target)
+
+    # The baseline is shared by every problem, so it does not travel inside the bundle: a
+    # scratch project gets its own copy. The checkpoint is excluded -- it is 16 MB, and the
+    # tests that need a file there write a stub (`with_checkpoint=True`).
+    shared = Path(project) / "baseline"
+    if PACKAGE_BASELINE.is_dir() and not shared.is_dir():
+        shutil.copytree(
+            PACKAGE_BASELINE,
+            shared,
+            ignore=shutil.ignore_patterns("checkpoints", "__pycache__"),
+        )
     return target
 
 
@@ -74,10 +96,13 @@ def write_project(
     install_problem(project, problem)
 
     if with_baseline:
-        (project / "baseline" / "pomo").mkdir(parents=True, exist_ok=True)
-        (project / "baseline" / "pomo" / "CVRProblemDef.py").write_text("# pomo stub\n", encoding="utf-8")
+        pomo = project / "baseline" / "pomo"
+        pomo.mkdir(parents=True, exist_ok=True)
+        # `install_problem` already copied the real tree; only write a stub when there is
+        # none, so a test that imports POMO still gets the real files.
+        if not (pomo / "CVRProblemDef.py").is_file():
+            (pomo / "CVRProblemDef.py").write_text("# pomo stub\n", encoding="utf-8")
         (project / "baseline" / "checkpoints").mkdir(parents=True, exist_ok=True)
-        (project / "baseline" / "BASELINE_NOTES.md").write_text("# baseline\n", encoding="utf-8")
     if with_checkpoint:
         checkpoint = project / "baseline" / "checkpoints" / "checkpoint-30500.pt"
         checkpoint.parent.mkdir(parents=True, exist_ok=True)

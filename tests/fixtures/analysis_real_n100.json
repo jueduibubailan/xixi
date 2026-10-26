@@ -315,7 +315,7 @@
     "Write run.py, the acceptance surface: resolve the baseline by walking up from __file__ to the directory holding pomo/ and put that directory, pomo/ and pomo/POMO/ on sys.path (never a literal '../..'); run one greedy augmented pass and print the initial line; then run the remaining --iteration passes (greedy + sampled rollouts, best kept), validate the best route set against the instance's own semantics before dumping it, print the best line with a fixed-point format, and write {'routes': ..., 'cost': ...} when --save-solution is given.",
     "Write README.md with the '## Baseline correspondence' table (one row per deliverable), the exact train/test commands, what was implemented versus deferred, and the skipped checkpoint key (decoder.Wq_last.weight).",
     "Keep one improvement pass at the cost of a single augmented rollout (~1-2 s on CPU), so the grader's --iteration 100 stays far inside its 3600 s budget; measure the per-pass time in the smoke run and say so in the summary.",
-    "Verify in the executor's gate order -- py_compile, import_probe, correspondence, smoke_run, full_run -- and reproduce a single gate with `cvrp stage <name>` instead of re-running the whole pipeline when one of them fails.",
+    "Verify in the executor's gate order -- py_compile, import_probe, correspondence, smoke_run, full_run -- and reproduce a single gate with `vrpar stage <name>` instead of re-running the whole pipeline when one of them fails.",
     "Declare no dependencies and run no installs: torch, numpy, pytz and matplotlib are already installed and pinned by workspace.setup, and the interpreter that runs the deliverable is this project's venv."
   ],
   "related_knowledge": {
@@ -333,7 +333,7 @@
       {
         "source": "main/skills/cvrptw_skill.md",
         "applies_because": "reproducing one stage instead of a whole run is a process fact, and it is the difference between one revise round and three when a single gate fails.",
-        "action": "run_plan: reproduce a single gate with `cvrp stage <name>` instead of re-running the pipeline when one of them fails."
+        "action": "run_plan: reproduce a single gate with `vrpar stage <name>` instead of re-running the pipeline when one of them fails."
       }
     ],
     "rejected": [

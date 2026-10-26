@@ -3,10 +3,26 @@
   "full_name": "Capacitated Vehicle Routing Problem with Time Windows",
   "summary": "Capacity plus time windows. Travel time equals Euclidean distance with no vehicle speed; a vehicle may arrive early and wait, but must not arrive after a customer's due time. The depot may always be returned to, which is what keeps the rollout from deadlocking.",
   "constraints": [
-    {"id": "C", "name": "Capacity", "rule": "the served load of a route must never exceed the vehicle capacity"},
-    {"id": "TW", "name": "Time Windows", "rule": "the arrival time at a customer must be <= due; arriving before ready is legal and the vehicle waits"},
-    {"id": "V", "name": "Visit", "rule": "every customer is served exactly once"},
-    {"id": "D", "name": "Depot", "rule": "every route starts and ends at the depot (node 0)"}
+    {
+      "id": "C",
+      "name": "Capacity",
+      "rule": "the served load of a route must never exceed the vehicle capacity"
+    },
+    {
+      "id": "TW",
+      "name": "Time Windows",
+      "rule": "the arrival time at a customer must be <= due; arriving before ready is legal and the vehicle waits"
+    },
+    {
+      "id": "V",
+      "name": "Visit",
+      "rule": "every customer is served exactly once"
+    },
+    {
+      "id": "D",
+      "name": "Depot",
+      "rule": "every route starts and ends at the depot (node 0)"
+    }
   ],
   "state_variables": [
     {
@@ -119,13 +135,36 @@
     "risk": "feeding time features into the encoder changes its input width and makes every encoder weight unloadable"
   },
   "run_plan": [
-    "write CVRPLTWProblemDef.py with a json loader and random instance generation including time windows",
-    "write CVRPLTWEnv.py with the new state and the three mask helpers plus the depot exception",
-    "write CVRPLTWModel.py reusing the encoder unchanged and widening only the context layer",
-    "write CVRPLTWTrainer.py and CVRPLTWTester.py following the baseline REINFORCE and rollout structure",
-    "write train_n20.py and test_n20.py entry points",
-    "write run.py that prints the two contract lines and dumps the best solution",
-    "compile, smoke-run with a small iteration budget, then run the full budget"
+    {
+      "step": 1,
+      "action": "adapt the problem definition to CVRPLTW: demands, time windows, service times, plus the per-instance max_route_length",
+      "file": "CVRPLTWProblemDef.py",
+      "symbol": "get_random_problems"
+    },
+    {
+      "step": 2,
+      "action": "add the route-length accounting and mask a customer that would push the current route past max_route_length",
+      "file": "CVRPLTWEnv.py",
+      "symbol": "_get_mask"
+    },
+    {
+      "step": 3,
+      "action": "keep the encoder input at the two coordinates and let the length state enter the decoder context",
+      "file": "CVRPLTWModel.py",
+      "symbol": "set_decoder_context"
+    },
+    {
+      "step": 4,
+      "action": "make the entry program load the instance, run the rollouts and print both contract lines",
+      "file": "run.py",
+      "symbol": "main"
+    },
+    {
+      "step": 5,
+      "action": "confirm the acceptance lines print on a real instance",
+      "command": "python run.py --path <instance.json> --iteration 5",
+      "expect": "the process is successful, the best cost is <float>"
+    }
   ],
   "open_questions": [
     "whether the baseline checkpoint's decoder context width must change, which would leave exactly one layer randomly initialised"

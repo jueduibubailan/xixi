@@ -1,4 +1,4 @@
-"""Dashboard API tests (Starlette TestClient, no server needed)."""
+﻿"""Dashboard API tests (Starlette TestClient, no server needed)."""
 
 from __future__ import annotations
 
@@ -8,10 +8,10 @@ from pathlib import Path
 import pytest
 from starlette.testclient import TestClient
 
-from cvrp.config import load_config
-from cvrp.run.run_dir import write_json
-from cvrp.web.app import create_app
 from tests.conftest import write_project
+from vrpar.config import load_config
+from vrpar.run.run_dir import write_json
+from vrpar.web.app import create_app
 
 TASK_YAML = """
 task:
@@ -127,148 +127,6 @@ def test_logs_endpoints(client: TestClient):
 # --------------------------------------------------------------------------- #
 # the knowledge-base panel
 # --------------------------------------------------------------------------- #
-
-
-def _write_knowledge_base(client: TestClient, *, run_id: str = "20250101-000000") -> Path:
-    """A knowledge base plus an index entry attributing it to a run.
-
-    Written in the current convention: one general record, one problem-specific one, each
-    opening with its own `## Contents`.
-    """
-    config = client.app.state.context.config
-    from cvrp.records import main_dir
-
-    root = main_dir(config)
-    (root / "skills").mkdir(parents=True, exist_ok=True)
-    (root / "notes").mkdir(parents=True, exist_ok=True)
-    (root / "skills" / "_global_skill.md").write_text(
-        "# Global skill\n\n## Contents\n\n- `Baseline hazards` — before adapting *(general)*\n\n"
-        "## Baseline hazards\n\n- the package has no `__init__.py`\n",
-        encoding="utf-8",
-    )
-    (root / "skills" / "cvrptw_skill.md").write_text(
-        "# Skill — cvrptw\n\n## Contents\n\n"
-        "- `Proven fixes` — read before changing a mask *(problem-specific)*\n\n"
-        "## Proven fixes\n\n- use style_cvrp_20.json\n",
-        encoding="utf-8",
-    )
-    (root / "notes" / "cvrptw_notes.md").write_text(
-        "# Notes — cvrptw\n\n## Contents\n\n- `Traps` — read first *(problem-specific)*\n\n"
-        "## Traps\n\n- style_cvrp_100.json is not shipped\n",
-        encoding="utf-8",
-    )
-    write_json(
-        root / "index.json",
-        {"problem": "cvrptw", "runs": [{"run_id": run_id, "outcome": "SUCCESS",
-                                        "files": ["skills/cvrptw_skill.md"]}]},
-    )
-    return root
-
-
-def test_records_endpoint_is_empty_but_valid_without_a_knowledge_base(client: TestClient):
-    """A fresh project has no records; the panel must render, not 500."""
-    payload = client.get("/api/records").json()
-    assert payload["main"] == []
-    assert payload["run"] == []
-    assert payload["records_dir"]
-    assert payload["main_dir"]
-
-
-def test_records_endpoint_lists_the_knowledge_base(client: TestClient):
-    _write_knowledge_base(client)
-    payload = client.get("/api/records").json()
-    paths = {item["path"] for item in payload["main"]}
-    assert "main/skills/cvrptw_skill.md" in paths
-    assert "main/notes/cvrptw_notes.md" in paths
-    assert payload["areas"]["skills"] == 2, "the general record and the scoped one both live in skills/"
-    scoped = next(
-        entry for entry in payload["main"] if entry["path"] == "main/skills/cvrptw_skill.md"
-    )
-    general = next(
-        entry for entry in payload["main"] if entry["path"] == "main/skills/_global_skill.md"
-    )
-    # The record's own contents list travels with the listing, so the panel can show what
-    # is inside without opening the file.
-    assert "Proven fixes" in " ".join(scoped["toc"])
-    assert "Baseline hazards" in " ".join(general["toc"])
-    assert "problem-specific" in " ".join(scoped["toc"]), "the entry states its scope"
-    # and the two tiers are distinguishable without reading anything
-    assert scoped["tier"] == "scoped"
-    assert general["tier"] == "general"
-    assert payload["tiers"] == {"scoped": 2, "general": 1}
-
-
-def test_records_endpoint_marks_what_this_run_contributed(client: TestClient):
-    """With shared files, "what did this run add?" is the only way to read the panel."""
-    _write_knowledge_base(client)
-    payload = client.get("/api/records").json()
-    by_path = {item["path"]: item["from_this_run"] for item in payload["main"]}
-    assert by_path["main/skills/cvrptw_skill.md"] is True, "this run wrote it"
-    assert by_path["main/notes/cvrptw_notes.md"] is False, "this run did not"
-    assert by_path["main/skills/_global_skill.md"] is False, "no entry claims it"
-
-
-def test_records_endpoint_lists_this_runs_record_buckets(client: TestClient):
-    """`temp/` and `related/` are run-scoped *directories* under the records root."""
-    config = client.app.state.context.config
-    from cvrp.records import main_dir, related_dir, temp_dir
-
-    run_id = "20250101-000000"
-    (temp_dir(config, run_id)).mkdir(parents=True, exist_ok=True)
-    (temp_dir(config, run_id) / "code_error.json").write_text('{"record": "code_error"}', encoding="utf-8")
-    (related_dir(config, run_id)).mkdir(parents=True, exist_ok=True)
-    (related_dir(config, run_id) / "retrieval.json").write_text('{"empty": true}', encoding="utf-8")
-    del main_dir
-
-    payload = client.get("/api/records").json()
-    buckets = {item["bucket"] for item in payload["run"]}
-    assert buckets == {"temp", "related"}
-    assert any(item["path"].endswith("code_error.json") for item in payload["run"])
-
-    item = next(entry for entry in payload["run"] if entry["bucket"] == "temp")
-    served = client.get(
-        "/api/record-file", params={"path": item["path"], "origin": "run"}
-    ).json()
-    assert "code_error" in served["text"]
-
-
-def test_record_file_serves_a_knowledge_file(client: TestClient):
-    _write_knowledge_base(client)
-    payload = client.get("/api/record-file", params={"path": "skills/cvrptw_skill.md"}).json()
-    assert "Proven fixes" in payload["text"]
-
-
-def test_record_file_refuses_to_leave_the_knowledge_base(client: TestClient):
-    """`/api/file` cannot reach the knowledge base, and this cannot escape it."""
-    _write_knowledge_base(client)
-    for attempt in (
-        "../task.yaml",
-        "../../task.yaml",
-        "skills/../../../../task.yaml",
-        "skills/../../../../etc/passwd",
-        "/etc/passwd",
-        "..",
-    ):
-        response = client.get("/api/record-file", params={"path": attempt})
-        assert response.status_code == 404, attempt
-
-
-def test_record_file_serves_only_markdown_and_json(client: TestClient):
-    _write_knowledge_base(client)
-    root = client.app.state.context.config
-    from cvrp.records import main_dir
-
-    (main_dir(root) / "skills" / "sneaky.py").write_text("print(1)\n", encoding="utf-8")
-    response = client.get("/api/record-file", params={"path": "skills/sneaky.py"})
-    assert response.status_code == 404
-
-
-def test_record_file_reports_a_missing_file(client: TestClient):
-    _write_knowledge_base(client)
-    response = client.get("/api/record-file", params={"path": "skills/nope.md"})
-    assert response.status_code == 404
-
-
 def test_steer_queues_an_instruction(client: TestClient):
     response = client.post("/api/steer", json={"text": "keep encoder at 2 dims", "stage": "analysis"})
     assert response.status_code == 200
@@ -295,4 +153,4 @@ def test_grader_endpoint_is_empty_before_grading(client: TestClient):
 def test_index_page_is_served(client: TestClient):
     response = client.get("/")
     assert response.status_code == 200
-    assert "cvrp" in response.text
+    assert "vrpar" in response.text

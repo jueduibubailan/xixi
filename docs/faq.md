@@ -126,23 +126,15 @@ evaluation); copy it in yourself if you want that. The export also appends a
 
 ### Does the pipeline remember anything between runs?
 
-Yes -- that is what `records/` is for, and it is the only output that outlives a run.
-`records/temp/<run_id>/` holds one record per agent (the problem description, the parsed
-description, what was generated, the error evidence plus a model narration of it, and what
-was revised). `records/related/<run_id>/` holds what the retrieval stage selected for this
-run. `records/main/` is the durable part: `skills/<tag>_skill.md`,
-`notes/<tag>_notes.md`, `attempts/<tag>_attempts.md`, plus an index of which run
-contributed what.
+No. There is no knowledge base and no retrieval stage: each run is solved from the problem
+description alone, and nothing is carried forward from a previous run. That is deliberate —
+it keeps a run reproducible from its inputs, and it removes the failure mode where a stale
+record steers an analysis that the description does not support.
 
-Exactly two stages read knowledge -- `retrieval` reads `records/main/` in full, and
-`analysis` reads what retrieval selected, as **reference material**: retrieved records
-shape wording, ordering and thresholds, and the analysis may also ignore them entirely.
-Nothing about the selection is compared against its plan, and a missing or thin
-`related_knowledge` block is reported as advice rather than failing the run. The generation,
-error and revise stages deliberately read none of it: they work from the analysis contract
-and from what the code actually does when it runs.
+What *is* reusable is the repository itself: the shared baseline under `baseline/`, the
+checker under `problems/<name>/grader/`, and the prompts under `src/vrpar/prompts/`. Those
+change only when a human changes them.
 
-The base has two tiers: `_global_*.md` holds what applies to any problem, and `<tag>_*.md` what applies to one. Every record opens with a `## Contents` list so a reader can see what is inside before loading it. Set `records.dir` to an absolute path to share one knowledge base across projects. `uv run cvrp ui` has a **Files** card whose *Knowledge base* tab browses `records/main/` and marks this run's contributions with `[new]`; the *This run* tab shows the per-run `temp/` and `related/` buckets. See [docs/records.md](records.md).
 
 ### Where do the plotting style files live, and what do their bounds mean?
 
@@ -228,10 +220,10 @@ Everything derived from it follows: the generated entry points become
 executor selects an n=50 instance. Ready-made examples ship with the project:
 
 ```bash
-uv run cvrp instances task_n50.yaml                 # synthesize n50 data
-uv run cvrp start task_n50.yaml llm.backend=mock    # offline self-check
-uv run cvrp start task_n50.yaml                     # real run (n=50)
-uv run cvrp start task_n100.yaml                    # n=100
+uv run vrpar instances task_n50.yaml                 # synthesize n50 data
+uv run vrpar start task_n50.yaml llm.backend=mock    # offline self-check
+uv run vrpar start task_n50.yaml                     # real run (n=50)
+uv run vrpar start task_n100.yaml                    # n=100
 ```
 
 Things worth knowing:
@@ -288,7 +280,7 @@ Two different things produce this, and they need different fixes.
 **(a) The router was removed from the environment.** `deepseek-flash` is **not a
 native Anthropic model name**. It only works when the Claude Code CLI sends its
 traffic to a router (LiteLLM, an internal proxy, …) named by
-`ANTHROPIC_BASE_URL`. Older versions of `cvrp` stripped that variable from the
+`ANTHROPIC_BASE_URL`. Older versions of `vrpar` stripped that variable from the
 agent environment as a "nested agent" precaution, so the CLI fell back to
 `api.anthropic.com`, presented a router-era key there, and got a 403 for a model
 Anthropic does not know.
@@ -314,14 +306,14 @@ comes from the upstream provider, not from the CLI. Common causes:
   `api_key: "os.environ/ANTHROPIC_AUTH_TOKEN"` is resolved inside the `litellm`
   process, so exporting the token in your shell after starting the proxy changes
   nothing;
-- the gateway is not actually running. `cvrp` never starts a gateway — it only
+- the gateway is not actually running. `vrpar` never starts a gateway — it only
   consumes one. If `ANTHROPIC_BASE_URL` points at a port nothing listens on, the
   CLI reports a connection failure, not a 403.
 
 Answer all three with one command:
 
 ```bash
-uv run cvrp doctor --probe
+uv run vrpar doctor --probe
 ```
 
 ```
@@ -338,15 +330,15 @@ touching the agent.
 
 Newly generated reports have a **`## Why it failed`** section with the full stage
 error, plus a **`## Diagnostics`** block that lists every declared artifact
-(present or `MISSING`), whether each stage's `CVPR.md` was rendered and what it
+(present or `MISSING`), whether each stage's `VRPAR.md` was rendered and what it
 contains, and the tails of the pipeline and agent logs. If you are looking at a
 report written before that existed:
 
 ```bash
-uv run cvrp doctor                       # is the runtime even able to run?
-uv run cvrp status                       # the stage table, with the failure message
-uv run cvrp log -n 200                   # pipeline.log: the gate's own reason
-uv run cvrp show logs/analysis.round0.log   # what the agent did or did not do
+uv run vrpar doctor                       # is the runtime even able to run?
+uv run vrpar status                       # the stage table, with the failure message
+uv run vrpar log -n 200                   # pipeline.log: the gate's own reason
+uv run vrpar show logs/analysis.round0.log   # what the agent did or did not do
 ```
 
 ### `analysis gate failed`
@@ -355,7 +347,7 @@ Two causes, in order of likelihood:
 
 1. **the agent never ran.** The `claude` CLI was not on the path of the process
    `uv run` spawns, so the turn returned `rc=127` and wrote nothing. Run
-   `uv run cvrp doctor` — it checks exactly this and says what to fix.
+   `uv run vrpar doctor` — it checks exactly this and says what to fix.
 2. **the agent ran but produced nothing usable.** It wrote no
    `artifacts/analysis/analysis.json`, wrote invalid JSON, or omitted a required
    field (`masking_rules`, `feasibility_checklist`, `pomo_modification_plan`, ...).
@@ -374,7 +366,7 @@ trivially — so a crashed agent (or a missing CLI) was reported as a pass, and 
 previous round's result was carried forward as the current one.
 
 The gates now compare against a **content snapshot taken immediately before the
-agent runs** (`cvrp.run.worktree.write_baseline`). A stage fails when *none* of its
+agent runs** (`vrpar.run.worktree.write_baseline`). A stage fails when *none* of its
 declared outputs changed during the attempt; a partial update (a revision round
 that patches one file) still counts as work. Timestamps are deliberately not used:
 a worktree can be recreated, and seeding preserves mtimes through `copy2`, so an
@@ -384,45 +376,43 @@ mtime check reports a stale file as fresh. Regression coverage is in
 ### How do I re-run just the stage that failed?
 
 ```bash
-uv run cvrp stage analysis                     # on the latest run
-uv run cvrp stage analysis --run 20261006-191954
-uv run cvrp stage code_error --task configs/tasks/cvrptw.yaml
+uv run vrpar stage analysis                     # on the latest run
+uv run vrpar stage analysis --run 20261006-191954
+uv run vrpar stage code_error --task configs/tasks/cvrptw.yaml
 ```
 
 A replay updates that stage's record in `state.json` and appends a `stage_replay`
 event, but does **not** re-export or write a new REPORT.md — run
-`uv run cvrp start` when you want a graded, exported result. The stage's worktree,
-its rendered `CVPR.md` and its logs are all still there from the failed attempt,
+`uv run vrpar start` when you want a graded, exported result. The stage's worktree,
+its rendered `VRPAR.md` and its logs are all still there from the failed attempt,
 which is usually what you want to inspect first.
 
 ### How do I solve a different VRP variant?
 
 ```bash
-uv run cvrp new-problem <slug> --name "<Variant name>" --from "<one paragraph>"
+cp -r problems/cvrptw problems/<slug>   # then edit its task.yaml
 ```
 
-That scaffolds a complete problem directory; you then edit three things
-(`checks.py:verify`, `instances.py:generate_instance`, and the S1/S2 prompts) and
-point `task.yaml:problem.slug` at it. `docs/new_problem.md` is the full
-walkthrough. `cvrp problems` lists the variants this project can build.
+That copies the shipped bundle. Edit three things in its `task.yaml` — the identity, the `generated:` file set and the `data:` block — and the checker in `grader/`. `docs/new_problem.md` walks through it.
+
 
 ### Where is `cvrptw` hardcoded?
 
 It isn't, anywhere in the engine. It is only the first *example*:
-`src/cvrp/problems/cvrptw/` (shipped with the package) and the `problem.slug` in
+`src/vrpar/problems/cvrptw/` (shipped with the package) and the `problem.slug` in
 `task.yaml`. `tests/test_problems.py` scaffolds a second, unrelated problem and
 runs it through the same machinery specifically to keep it that way.
 
 ### `claude` is not found
 
-`cvrp` shells out to the Claude Code CLI. Install it in the VM and log in as the
+`vrpar` shells out to the Claude Code CLI. Install it in the VM and log in as the
 model you want, or point the config at an absolute path:
 
 ```bash
-uv run cvrp start task.yaml llm.claude_bin=/usr/local/bin/claude
+uv run vrpar start task.yaml llm.claude_bin=/usr/local/bin/claude
 ```
 
-`uv run cvrp validate` reports the model and backend it will use. To run the whole
+`uv run vrpar validate` reports the model and backend it will use. To run the whole
 pipeline without an agent session, use `llm.backend=mock`.
 
 ### Which model is used?
@@ -430,11 +420,11 @@ pipeline without an agent session, use `llm.backend=mock`.
 `task.yaml:llm.model`, currently `deepseek-flash`. It is passed straight to
 `claude --model`, so whatever the CLI accepts works. One model is used for every
 agent stage; per-stage models are not implemented (add a `model` key to a stage and
-read it in `cvrp/pipeline/stages.py::run_agent_stage` if you need that).
+read it in `vrpar/pipeline/stages.py::run_agent_stage` if you need that).
 
 ### Is my API key stored anywhere?
 
-No. The VM's Claude Code holds its own credentials, and `cvrp` never reads or
+No. The VM's Claude Code holds its own credentials, and `vrpar` never reads or
 writes a key. `llm.env` exists only to pass extra environment variables to the
 agent process. (`baseline/afl/` contains the upstream AFL files verbatim, and those
 do carry a hardcoded key from the original authors — they are reference only and
@@ -458,7 +448,7 @@ feasibility on its own and must never assume it. Implement
 ### What if I don't write `checks.py` at all?
 
 The run is still possible, but the verification degrades to "the dump is valid
-JSON" and the report says so explicitly. `cvrp validate` warns about it. For
+JSON" and the report says so explicitly. `vrpar validate` warns about it. For
 anything you intend to trust, implement `verify`.
 
 ### Can I use bigger instances?
@@ -466,7 +456,7 @@ anything you intend to trust, implement `verify`.
 Yes, but size them in the problem spec (data parameters belong to the problem):
 
 ```bash
-uv run cvrp instances --force instances.data.sizes=[50]
+uv run vrpar instances --force instances.data.sizes=[50]
 ```
 
 Watch the horizon: `data.horizon: null` derives it from the canonical schedule,
@@ -478,7 +468,7 @@ raises instead of emitting an infeasible instance.
 `loop.max_rounds` (default 5) is a hard bound:
 
 ```bash
-uv run cvrp start task.yaml loop.max_rounds=2
+uv run vrpar start task.yaml loop.max_rounds=2
 ```
 
 Every round leaves evidence in `artifacts/revisions/`, and the run still writes a
@@ -494,7 +484,7 @@ constraint.
 ### It says "CORAL not importable". Do I care?
 
 No, it is informational. Enable the shell with `uv pip install -e ../CORAL1` (from
-`new/`), after which `cvrp validate` reports the CORAL version and runtime status.
+`new/`), after which `vrpar validate` reports the CORAL version and runtime status.
 The adapter only uses CORAL's Claude Code runtime; the pipeline never needs CORAL's
 manager, daemon or dashboard.
 
@@ -506,7 +496,7 @@ run), and the full history stays under `results/<slug>/<timestamp>/`.
 ### `uv run` fails on a locked-down Windows VM
 
 Two environment issues show up on hardened Windows images, both unrelated to
-`cvrp`:
+`vrpar`:
 
 * `Failed to initialize cache at ...\uv\cache` — set `UV_CACHE_DIR` to a writable
   directory (for example inside the project).
@@ -515,7 +505,7 @@ Two environment issues show up on hardened Windows images, both unrelated to
 
 ### The dashboard shows "no runs"
 
-Run `uv run cvrp start …` first. The UI reads `results/`, and `cvrp clean` deletes
-it (`cvrp clean --all`). Start the UI from the project root so that
+Run `uv run vrpar start …` first. The UI reads `results/`, and `vrpar clean` deletes
+it (`vrpar clean --all`). Start the UI from the project root so that
 `configs/default.yaml` resolves; otherwise pass the task file explicitly
-(`uv run cvrp ui task.yaml`).
+(`uv run vrpar ui task.yaml`).

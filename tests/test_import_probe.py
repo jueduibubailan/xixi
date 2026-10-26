@@ -17,9 +17,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from cvrp.executor.contract import import_probe, py_compile
-from cvrp.problems import load_problem
 from tests.conftest import PACKAGE_PROBLEMS, baseline_of
+from vrpar.executor.contract import import_probe, py_compile
+from vrpar.problems import load_problem
 
 PROBLEM = load_problem(PACKAGE_PROBLEMS / "cvrptw", slug="cvrptw")
 

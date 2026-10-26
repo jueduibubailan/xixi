@@ -1,5 +1,5 @@
 [project]
-name = "cvrp"
+name = "vrpar"
 version = "0.1.0"
 description = "CVRP-variant code synthesis pipeline: analysis agent -> code generation agent -> error agent -> revise agent, built on POMO, orchestrated CORAL-style."
 readme = "README.md"
@@ -8,7 +8,7 @@ license = { text = "MIT" }
 dependencies = [
     # Intentionally minimal. `yaml` parses task configs; starlette/uvicorn serve
     # the dashboard. CORAL-style dotlist overrides are implemented in
-    # `cvrp.config.apply_overrides`, so omegaconf is not needed.
+    # `vrpar.config.apply_overrides`, so omegaconf is not needed.
     "pyyaml>=6.0",
     "starlette>=0.40.0",
     "uvicorn>=0.30.0",
@@ -34,19 +34,19 @@ dependencies = [
 #
 #     uv pip install -e ../CORAL1
 #
-# `uv run cvrp validate` then reports "CORAL 0.5.0 ... (runtime OK)" instead of
+# `uv run vrpar validate` then reports "CORAL 0.5.0 ... (runtime OK)" instead of
 # "CORAL not importable".
 dev = ["pytest>=8.0.0", "ruff>=0.5.0", "httpx>=0.27"]
 
 [project.scripts]
-cvrp = "cvrp.cli:main"
+vrpar = "vrpar.cli:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/cvrp"]
+packages = ["src/vrpar"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -66,7 +66,7 @@ extend-exclude = [
     # reformatting it would create a diff against upstream for no benefit, and the
     # agents are supposed to modify it, not us.
     "problems/*/pomo",
-    "src/cvrp/problems/*/pomo",
+    "src/vrpar/problems/*/pomo",
 ]
 
 [tool.ruff.lint]

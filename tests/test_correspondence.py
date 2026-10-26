@@ -17,32 +17,31 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from cvrp.executor.correspondence import (
+from tests.conftest import PACKAGE_PROBLEMS, baseline_of
+from vrpar.executor.correspondence import (
     CORRESPONDENCE_LINE,
     POMO_TESTING_PARAMS,
     POMO_TRAINING_PARAMS,
     check_correspondence,
     declared_correspondence,
 )
-from cvrp.problems import load_problem
-from tests.conftest import PACKAGE_PROBLEMS
+from vrpar.problems import load_problem
 
 PROBLEM = load_problem(PACKAGE_PROBLEMS / "cvrptw", slug="cvrptw")
 
 
 def _baseline() -> Path:
-    """The bundle's baseline directory, as `resources.baseline_dir` resolves it.
+    """The baseline directory, resolved the way the seeder resolves it.
 
-    A problem bundle keeps its reference implementation in `seed/`; the correspondence table
-    addresses it as `pomo/...` relative to that. Reading the spec instead of hardcoding the
-    path means a problem can move its baseline without touching tests.
+    The baseline is shared by every problem and lives at the project root, so `baseline_of`
+    tries the problem directory first and the project root second. Reading the spec keeps the
+    test in step with the engine instead of hardcoding a path.
     """
-    raw = str((PROBLEM.spec.get("resources") or {}).get("baseline_dir") or ".")
-    return PROBLEM.root / raw
+    return baseline_of(PROBLEM)
 
 
 def _styles() -> Path:
-    """The plotting-style directory inside the bundle's baseline."""
+    """The plotting-style directory inside the shared baseline."""
     return _baseline() / "pomo" / "POMO" / "utils" / "log_image_style"
 
 

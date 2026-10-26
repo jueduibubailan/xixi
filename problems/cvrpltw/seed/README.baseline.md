@@ -1,6 +1,6 @@
 # BASELINE_NOTES — POMO (CVRP) 与 AFL 参考实现
 
-本目录是**只读基线**。每次 `cvrp start` 会把它复制到 `results/<task>/<ts>/worktrees/` 下，
+本目录是**只读基线**。每次 `vrpar start` 会把它复制到 `results/<task>/<ts>/worktrees/` 下，
 agent 只在副本里改代码。**永远不要直接改这里的文件**（改副本，或者改真正需要改的上游）。
 
 ## 0. ★交付约束（动手前先读这一节）
@@ -72,7 +72,7 @@ agent 只在副本里改代码。**永远不要直接改这里的文件**（改�
 
 ```
 # 本 problem 自带的基线载荷（随 problem 一起分发，自包含）
-src/cvrp/problems/cvrpltw/
+src/vrpar/problems/cvrpltw/
 ├─ pomo/                            # POMO 官方 CVRP 实现（要在此基础上改造）
 │  ├─ CVRProblemDef.py              # 随机实例生成 + 8 折数据增强
 │  └─ POMO/
@@ -97,11 +97,11 @@ baseline/                           # 项目级共享载荷（其他变种可以
 ```
 
 > 两份 `checkpoint-30500.pt` 是同一个文件：`baseline/checkpoints/` 是共享副本，
-> `src/cvrp/problems/cvrpltw/checkpoints/` 让 problem 目录可以独立分发。
+> `src/vrpar/problems/cvrpltw/checkpoints/` 让 problem 目录可以独立分发。
 > 见 `problem.yaml:resources.baseline_dir`——它先按**项目根**解析，再按 **problem 目录**解析。
 >
 > `baseline/afl/` 里带有 AFL 原作者硬编码的 DeepSeek API key（原样保留，便于对照）。
-> 本项目运行时不读取任何 key：`cvrp` 只通过已登录的 Claude Code CLI 调用模型。
+> 本项目运行时不读取任何 key：`vrpar` 只通过已登录的 Claude Code CLI 调用模型。
 
 ## 1. POMO CVRP 的现状（改造前）
 
@@ -251,7 +251,7 @@ def get_random_problems(batch_size, problem_size):
 
 ## 5. 验收契约
 
-生成代码通过的标准（`cvrp.executor.contract` 实现，`task.yaml:grader` 配置）：
+生成代码通过的标准（`vrpar.executor.contract` 实现，`task.yaml:grader` 配置）：
 
 1. `python -m py_compile` 全部通过；
 2. **import 探测**：每个导出模块都能在包根下被 import（缺 helper / 依赖错位在这里暴露）；
@@ -261,14 +261,14 @@ def get_random_problems(batch_size, problem_size):
 5. 全跑 `returncode == 0` 且 stdout 命中：
    - `the process is successful, the best cost is <float>`
    - `the initial process is successful, the initial cost is <float>`
-6. 通过 `cvrp.executor.feasibility` 的独立校验（时间窗/容量/单次访问/depot 往返）。
+6. 通过 `vrpar.executor.feasibility` 的独立校验（时间窗/容量/单次访问/depot 往返）。
 
 ## 6. AFL 参考实现的用法
 
 `baseline/afl/` 是**参考**，不是依赖，也**不会被任何代码 import**。
 
 > ⚠️ 这些文件里带有原作者硬编码的 DeepSeek API key（原样保留、未改动，便于与上游对照）。
-> 本项目的运行时代码不使用它：`cvrp` 只通过已登录的 Claude Code CLI 调用模型，
+> 本项目的运行时代码不使用它：`vrpar` 只通过已登录的 Claude Code CLI 调用模型，
 > 不读取任何 key。若要长期保留该目录，建议先把 key 换成
 > `os.getenv("DEEPSEEK_API_KEY")`，或直接删除 `baseline/afl/`。
 
@@ -282,7 +282,7 @@ def get_random_problems(batch_size, problem_size):
 | `code_judgement.py` | `problems/cvrpltw/prompts/s2_codegen_judge.md` |
 | `complete_code_revise.py` `code_analyse` | `problems/cvrpltw/prompts/s4_error_analyse.md` |
 | `complete_code_revise.py` `revise_prompt1` | `problems/cvrpltw/prompts/s4_revise.md` |
-| `main.py` 的 `run_generated_code` 正则 | `src/cvrp/executor/contract.py` |
+| `main.py` 的 `run_generated_code` 正则 | `src/vrpar/executor/contract.py` |
 
 AFL 里唯一值得原样继承的设计是 **"先生成、再 judge；judge 不过就拿 judge 意见重新生成"**。
 本流水线把它放在每个 agent 阶段内部（`Stage.internal_judge`），而不是只放在末尾。

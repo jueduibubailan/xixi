@@ -3,16 +3,16 @@
 Two entry points, one pipeline:
 
 ```bash
-uv run cvrp start task.yaml      # the pipeline
-uv run cvrp ui                   # watch it at http://127.0.0.1:8420
+uv run vrpar start task.yaml      # the pipeline
+uv run vrpar ui                   # watch it at http://127.0.0.1:8420
 ```
 
 `start` accepts dotlist overrides, CORAL-style:
 
 ```bash
-uv run cvrp start task.yaml llm.model=sonnet loop.max_rounds=8 run.verbose=true
-uv run cvrp start task.yaml llm.backend=mock          # no agent session needed
-uv run cvrp start task.yaml problem.slug=cvrptw-dr    # a different variant
+uv run vrpar start task.yaml llm.model=sonnet loop.max_rounds=8 run.verbose=true
+uv run vrpar start task.yaml llm.backend=mock          # no agent session needed
+uv run vrpar start task.yaml problem.slug=cvrptw-dr    # a different variant
 ```
 
 ---
@@ -20,17 +20,17 @@ uv run cvrp start task.yaml problem.slug=cvrptw-dr    # a different variant
 ## 0. Preparation
 
 ```
-load_config(task.yaml over configs/default.yaml)      src/cvrp/config.py
+load_config(task.yaml over configs/default.yaml)      src/vrpar/config.py
 ├─ dotlist overrides, then validation
-└─ attach_problem(): load problems/<slug>/             src/cvrp/problems/__init__.py
+└─ attach_problem(): load problems/<slug>/             src/vrpar/problems/__init__.py
    ├─ problem.yaml -> prompts, generated layout, CLI, data, resources, scorer
    ├─ checks.py    -> verify / build_dataset / score / extract_best_cost / revision_hints
-   └─ hooks are exposed as cvrp.problems.ProblemPlugin
+   └─ hooks are exposed as vrpar.problems.ProblemPlugin
 
-Orchestrator.__init__                                 src/cvrp/pipeline/orchestrator.py
-├─ make results/<slug>/<timestamp>/                   src/cvrp/run/run_dir.py
+Orchestrator.__init__                                 src/vrpar/pipeline/orchestrator.py
+├─ make results/<slug>/<timestamp>/                   src/vrpar/run/run_dir.py
 ├─ write config.resolved.json                         (the exact config this run used)
-└─ build the LLM backend                              src/cvrp/llm/claude_code.py (or mock)
+└─ build the LLM backend                              src/vrpar/llm/claude_code.py (or mock)
 
 ensure_instances()
 └─ problem.build_dataset(<problem data dir>)          problems/<slug>/instances.py
@@ -42,13 +42,13 @@ ensure_instances()
 ```
 seed worktree:  results/<ts>/worktrees/analysis/
                 resources.baseline_dir contents + data/instances/
-instruction:    CVPR.md  <- role + problems/<slug>/prompts/s1_analysis.md + context + contract
-agent turn:     claude -p <CVPR.md> --model deepseek-flash --permission-mode auto
+instruction:    VRPAR.md  <- role + problems/<slug>/prompts/s1_analysis.md + context + contract
+agent turn:     claude -p <VRPAR.md> --model deepseek-flash --permission-mode auto
                 --output-format stream-json --verbose    (log: logs/analysis.round0.log)
 agent writes:   artifacts/analysis/analysis.json
                 artifacts/analysis/plan.md
 collect:        -> results/<ts>/artifacts/analysis/*
-gate:           src/cvrp/pipeline/gates.py::gate_analysis
+gate:           src/vrpar/pipeline/gates.py::gate_analysis
                 every constraint has a mask, the checklist is checkable, the plan names real symbols
 fail ->         run ends as FAILED (nothing downstream recovers from a vague analysis)
 ```
@@ -143,7 +143,7 @@ report :  results/<ts>/REPORT.md
 
 ## The dashboard
 
-`uv run cvrp ui` serves a single-page app over `results/`:
+`uv run vrpar ui` serves a single-page app over `results/`:
 
 | endpoint | contents |
 |---|---|
@@ -161,7 +161,7 @@ report :  results/<ts>/REPORT.md
 
 **Steering**: an instruction queued from the dashboard is stored in
 `state.json:instruction_queue` and consumed by the next matching stage, where it
-appears as an "Operator instructions" section in `CVPR.md`. Targets: `analysis`,
+appears as an "Operator instructions" section in `VRPAR.md`. Targets: `analysis`,
 `code_generation`, `code_revise`, or any stage.
 
 ---
@@ -184,13 +184,13 @@ appears as an "Operator instructions" section in `CVPR.md`. Targets: `analysis`,
 ## Inspecting a run from the shell
 
 ```bash
-uv run cvrp problems                     # which variants this project can build
-uv run cvrp status                       # stage table for the latest run
-uv run cvrp log -n 200                   # tail logs/pipeline.log
-uv run cvrp log --name code_error.round1.log
-uv run cvrp show artifacts/analysis/analysis.json
-uv run cvrp show artifacts/runs/s3_run_report.json
-uv run cvrp grader --json                # re-run the exit gate
+uv run vrpar problems                     # which variants this project can build
+uv run vrpar status                       # stage table for the latest run
+uv run vrpar log -n 200                   # tail logs/pipeline.log
+uv run vrpar log --name code_error.round1.log
+uv run vrpar show artifacts/analysis/analysis.json
+uv run vrpar show artifacts/runs/s3_run_report.json
+uv run vrpar grader --json                # re-run the exit gate
 ```
 
 ## Adding a variant
@@ -198,8 +198,8 @@ uv run cvrp grader --json                # re-run the exit gate
 See `docs/new_problem.md`. Short version:
 
 ```bash
-uv run cvrp new-problem <slug> --name "<Variant name>" --from "<description>"
+cp -r problems/cvrptw problems/<slug>   # then edit its task.yaml
 # edit problems/<slug>/{problem.yaml,checks.py,instances.py,prompts/}
 # set problem.slug in task.yaml
-uv run cvrp validate && uv run cvrp instances && uv run cvrp start task.yaml
+uv run vrpar validate && uv run vrpar instances && uv run vrpar start task.yaml
 ```

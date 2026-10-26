@@ -20,8 +20,8 @@ from pathlib import Path
 
 import pytest
 
-from cvrp.llm import dsh
-from cvrp.llm.claude_code import make_backend
+from vrpar.llm import dsh
+from vrpar.llm.claude_code import make_backend
 
 
 def test_the_factory_accepts_the_names_coral_accepts():
@@ -119,9 +119,9 @@ def test_permission_and_tool_modes_go_through_the_environment(scratch: Path):
     )
     assert env["DSH_PERMISSION_MODE"] == "workspace-write"
     assert env["DSH_TOOLS_MODE"] == "native"
-    # DSH_HOME is a shared directory under the run, so stages inherit context
-    assert Path(env["DSH_HOME"]).name == ".dsh"
-    assert Path(env["DSH_HOME"]).is_dir()
+    # an explicit home is created and exported
+    assert Path(env[dsh.DSH_HOME_VAR]).name == ".dsh"
+    assert Path(env[dsh.DSH_HOME_VAR]).is_dir()
     assert env["EXTRA"] == "1"
 
 
@@ -134,16 +134,73 @@ def test_the_api_key_is_inherited_but_never_invented():
     assert env.get(dsh.API_KEY_VAR) == __import__("os").environ.get(dsh.API_KEY_VAR)
 
 
-def test_a_run_local_dsh_home_does_not_reuse_the_users_credential_store(scratch: Path):
-    """`dsh_home: .dsh` isolates the run, which also means the global store is not read.
+def test_the_users_real_home_is_inherited_by_default(scratch: Path):
+    """DSH reads its provider credential from `<home>/llm-deepseek/`.
 
-    That is why the documented way to authenticate a pipeline run is the environment
-    variable: a run-local DSH_HOME has no `.credentials.yaml` in it.
+    Pointing `DSH_HOME` at a fresh directory per run therefore made every turn fail with
+    `MISSING_CREDENTIAL` on a machine that was already authenticated. The default is to
+    leave the variable exactly as the launching shell had it -- so DSH finds the store it
+    was set up with, whether that is the default `~/.dsh` or an inherited override.
+    """
+    import os
+
+    backend = dsh.DshBackend({"backend": "dsh", "_run_dir": str(scratch)})
+    assert backend.dsh_home == ""
+    env = backend.environment()
+    # inherited, not invented: whatever the parent shell had is what the child sees
+    assert env.get(dsh.DSH_HOME_VAR) == os.environ.get(dsh.DSH_HOME_VAR)
+
+
+def test_an_explicit_dsh_home_still_isolates_the_run(scratch: Path):
+    """Isolation is still available, it just has to be asked for.
+
+    And the caller then has to authenticate the other documented way -- the environment
+    variable -- because a run-local home has no credential store in it.
     """
     backend = dsh.DshBackend({"backend": "dsh", "dsh_home": ".dsh", "_run_dir": str(scratch)})
-    home = Path(backend.environment()["DSH_HOME"])
+    home = Path(backend.environment()[dsh.DSH_HOME_VAR])
     assert home.parent == scratch
-    assert not (home / ".credentials.yaml").exists()
+    assert not (home / "llm-deepseek").exists()
+
+
+def test_the_home_probe_creates_the_profile_directory_dsh_would_create(scratch: Path):
+    """DSH dies at boot if it cannot mkdir `profiles/<profile>`, so ask first."""
+    home, note = dsh.resolve_dsh_home(str(scratch / "home"), scratch, "headless")
+    assert note == ""
+    assert (Path(home) / "profiles" / "headless").is_dir()
+
+
+def test_an_unwritable_inherited_home_falls_back_to_the_run(scratch: Path, monkeypatch):
+    """A restricted token or a read-only ACL must not kill the run at DSH boot.
+
+    The fallback is a run-local home, which the agent's sandbox always allows. Its cost is
+    stated in the note: the stored credential is no longer visible, so the environment
+    variable is what authenticates the turn.
+    """
+
+    def refuse(home: Path, profile: str) -> None:
+        raise PermissionError(13, "operation not permitted")
+
+    monkeypatch.setattr(dsh, "_ensure_profile_dir", refuse)
+    home, note = dsh.resolve_dsh_home("", scratch, "headless")
+    assert Path(home) == scratch / ".dsh"
+    assert dsh.API_KEY_VAR in note
+    assert "cannot write its profile" in note
+
+
+def test_the_fallback_reason_reaches_the_log(scratch: Path, monkeypatch):
+    """The report quotes the agent log, so the reason has to be in the log header."""
+
+    def refuse(home: Path, profile: str) -> None:
+        raise PermissionError(13, "operation not permitted")
+
+    monkeypatch.setattr(dsh, "_ensure_profile_dir", refuse)
+    backend = dsh.DshBackend({"backend": "dsh", "_run_dir": str(scratch)})
+    log = scratch / "turn.log"
+    backend.run("prompt", cwd=scratch / "wt", log_path=log, timeout_s=5)
+    text = log.read_text(encoding="utf-8")
+    assert "# note:" in text
+    assert dsh.API_KEY_VAR in text
 
 
 def test_the_temp_directory_is_inside_the_run(scratch: Path):
@@ -151,14 +208,18 @@ def test_the_temp_directory_is_inside_the_run(scratch: Path):
 
     DSH's file sandbox refuses writes outside the workspace, so that call failed with
     `EPERM ... mkdtemp '...\\Temp\\dsh-spill-XXXXXX'` and the plugin never activated.
+    This holds with the home inherited too, where the scratch dir lives under the run.
     """
-    backend = dsh.DshBackend({"backend": "dsh", "dsh_home": ".dsh", "_run_dir": str(scratch)})
-    env = backend.environment()
-    for name in dsh.TEMP_VARS:
-        assert Path(env[name]).is_dir(), name
-        assert str(env[name]).startswith(str(scratch)), f"{name} escaped the run: {env[name]}"
-    # and it is one directory, not three
-    assert len({env[name] for name in dsh.TEMP_VARS}) == 1
+    for config in (
+        {"backend": "dsh", "dsh_home": ".dsh", "_run_dir": str(scratch)},
+        {"backend": "dsh", "_run_dir": str(scratch)},
+    ):
+        env = dsh.DshBackend(config).environment()
+        for name in dsh.TEMP_VARS:
+            assert Path(env[name]).is_dir(), name
+            assert str(env[name]).startswith(str(scratch)), f"{name} escaped the run: {env[name]}"
+        # and it is one directory, not three
+        assert len({env[name] for name in dsh.TEMP_VARS}) == 1
 
 
 def test_temp_redirection_can_be_turned_off(scratch: Path):
@@ -186,7 +247,7 @@ def test_utf8_output_is_left_alone():
 
 
 def test_the_log_header_is_stripped_from_the_answer(scratch: Path):
-    header = "# cvrp agent turn (dsh)\n# profile: headless\n\n"
+    header = "# vrpar agent turn (dsh)\n# profile: headless\n\n"
     log = scratch / "turn.log"
     # `newline=""` matters: without it Windows writes \r\n and the byte prefix stops matching,
     # which is exactly the bug this test guards against.

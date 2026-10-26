@@ -1,7 +1,7 @@
 # CVRPTW at n=50: a thin task over the problem bundle in problems/cvrptw/.
 #
-#   uv run cvrp start task_n50.yaml
-#   uv run cvrp start task_n50.yaml llm.backend=mock     # offline self-check
+#   uv run vrpar start task_n50.yaml
+#   uv run vrpar start task_n50.yaml llm.backend=mock     # offline self-check
 task:
   name: "CVRPTW-n50-on-POMO"
   slug: "cvrptw-n50"
@@ -31,6 +31,9 @@ llm:
 workspace:
   results_dir: "./results"
   final_dir: "./workspace/final"
+  setup:
+    - ["uv pip install torch --index-url https://download.pytorch.org/whl/cu126",
+       "uv pip install torch --index-url https://download.pytorch.org/whl/cpu"]
 
 grader:
   iterations: 1000

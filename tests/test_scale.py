@@ -19,8 +19,9 @@ from pathlib import Path
 
 import pytest
 
-from cvrp.executor.contract import instance_problem_size, require_instance_size
-from cvrp.problems import (
+from tests.conftest import PACKAGE_PROBLEMS
+from vrpar.executor.contract import instance_problem_size, require_instance_size
+from vrpar.problems import (
     DEFAULT_PROBLEM_SIZE,
     ProblemError,
     ScaleParams,
@@ -28,7 +29,6 @@ from cvrp.problems import (
     render_spec,
     scale_from_config,
 )
-from tests.conftest import PACKAGE_PROBLEMS
 
 PROBLEM_DIR = PACKAGE_PROBLEMS / "cvrptw"
 
@@ -144,7 +144,7 @@ def test_agent_context_states_the_scale():
 
 def test_prompts_carry_the_scale(scratch: Path):
     """The rendered instruction must name the size, not a template or a stale n."""
-    from cvrp.pipeline.stages import stage_variables
+    from vrpar.pipeline.stages import stage_variables
 
     plugin = load_problem(PROBLEM_DIR, slug="cvrptw", scale=ScaleParams(problem_size=100))
     variables = stage_variables(
@@ -161,7 +161,7 @@ def test_prompts_carry_the_scale(scratch: Path):
 
 def test_scale_flows_from_the_task_file(scratch: Path):
     """End to end through config loading, which is where the tasks differ."""
-    from cvrp.config import load_config
+    from vrpar.config import load_config
 
     body = (
         "task:\n  name: t\n  slug: t\n"

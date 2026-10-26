@@ -7,12 +7,12 @@ This document is the "why" behind the layout. If you only read one thing, read �
 
 ## 1. Concept mapping
 
-| Concern | In CORAL | In AFL | In `cvrp` |
+| Concern | In CORAL | In AFL | In `vrpar` |
 |---|---|---|---|
 | Work unit | an agent that owns a lane and iterates forever | a pipeline pass over one `.vrp` file | a **stage** with a declared artifact contract |
 | What is being solved | a task (`task.yaml`) | one VRP variant, hardcoded in the prompts | a **problem plugin** (`problems/<slug>/`) |
-| Driving the model | `coral.agent.builtin.claude_code` spawns `claude -p` | direct OpenAI SDK calls | `cvrp.llm.claude_code.ClaudeCodeBackend`, delegating to CORAL's runtime when importable |
-| Instruction to the agent | generated `CORAL.md` + a per-agent role file | one long f-string per function | generated `CVPR.md` + a per-stage role file + the problem's prompt |
+| Driving the model | `coral.agent.builtin.claude_code` spawns `claude -p` | direct OpenAI SDK calls | `vrpar.llm.claude_code.ClaudeCodeBackend`, delegating to CORAL's runtime when importable |
+| Instruction to the agent | generated `CORAL.md` + a per-agent role file | one long f-string per function | generated `VRPAR.md` + a per-stage role file + the problem's prompt |
 | Shared state | `.coral/public/` (attempts, notes, skills, roles) | `vrp_meta.json` | `results/<task>/<ts>/{state.json, artifacts/, logs/, worktrees/}` |
 | Feedback loop | grader daemon scores every commit; heartbeat prompts react | `run_generated_code` → `revise_code` | executor gates → revision stage → re-run, bounded by `loop.max_rounds` |
 | Objective function | `grader` (any score) | "did it run and print a cost" | contract + the problem's `verify()` + `problem.yaml:scorer` |
@@ -23,7 +23,7 @@ This document is the "why" behind the layout. If you only read one thing, read �
 
 * **The grader daemon.** CORAL's daemon decouples long grades from agent turns
   across many parallel agents. This pipeline is sequential, so grading is a
-  function call (`cvrp.executor.grader.grade_run`).
+  function call (`vrpar.executor.grader.grade_run`).
 * **Heartbeats and islands.** Both are search-diversification mechanisms for a
   competitive pool. The contract here is a *sequence*, and the only diversity knob
   that matters is "did the code run".
@@ -75,7 +75,7 @@ from "the code is broken", and it makes the failure taxonomy greppable across ru
 
 AFL's `revise_code` does exactly this (one attribution call, one repair call) and
 it is a genuinely good idea: the repair call gets a short, focused instruction
-instead of a traceback and a vague hope. `cvrp` keeps the two-step structure and
+instead of a traceback and a vague hope. `vrpar` keeps the two-step structure and
 adds "reproduce before you finish", because a revision that ends without executing
 the code has a high chance of producing a second failure.
 
@@ -88,7 +88,7 @@ program, then hands the dumped solution to the **problem's own** `verify()`, whi
 is written independently of the generated code. `require_solution_dump: true` is
 the default: a run that cannot be verified is reported as failed, not as passing.
 
-The split matters: `cvrp.executor.grader` owns *how a run is scored*, the problem
+The split matters: `vrpar.executor.grader` owns *how a run is scored*, the problem
 owns *what a valid answer means*.
 
 ---
@@ -101,7 +101,7 @@ problems/<slug>/{problem.yaml, prompts/, checks.py, instances.py}
         |  (spec: prompts, generated layout, CLI, scorer)
         |                                   |
         v                                   v
-   CVPR.md (role + prompt + context)   instances/data/<slug>/*
+   VRPAR.md (role + prompt + context)   instances/data/<slug>/*
         |                                   |
         v                                   v
    worktrees/<stage>/  --agent edits-->  artifacts/generated/*
@@ -125,10 +125,10 @@ Directory roles inside a stage worktree:
 | `data/instances/` | no | the problem's generated data |
 | `data/artifacts/` | no | earlier stages' outputs (the inputs it may read) |
 | `artifacts/` | **yes** | the agent's declared outputs |
-| `CVPR.md`, `.cvrp/stage.json` | no | generated instruction + resolved stage config |
+| `VRPAR.md`, `.vrpar/stage.json` | no | generated instruction + resolved stage config |
 
-`cvrp.run.worktree.collect_artifacts` copies `artifacts/` out into the run
-directory and leaves it there. `cvrp.executor.contract.stage_search_paths` defines
+`vrpar.run.worktree.collect_artifacts` copies `artifacts/` out into the run
+directory and leaves it there. `vrpar.executor.contract.stage_search_paths` defines
 the read order everywhere else: `worktree/data` → `worktree` → run dir.
 
 ---
@@ -138,7 +138,7 @@ the read order everywhere else: `worktree/data` → `worktree` → run dir.
 1. **All variant knowledge lives in a problem directory.** `problem.yaml` supplies
    prompts, generated layout, CLI flags, data parameters, resources and scoring;
    `checks.py` supplies the hooks; `instances.py` supplies the data. The engine
-   reads them through `cvrp.problems.ProblemPlugin`. This is what makes "add a new
+   reads them through `vrpar.problems.ProblemPlugin`. This is what makes "add a new
    example" a scaffolding + editing task instead of a refactor.
 2. **The acceptance contract is textual.** `the process is successful, the best
    cost is <float>` is inherited from AFL. It is ugly but it survives arbitrary
@@ -149,7 +149,7 @@ the read order everywhere else: `worktree/data` → `worktree` → run dir.
    cannot resolve it, and the mistake would only surface as a confusing run much
    later. Leaving a visible trace was rejected in favour of failing quietly-fast;
    the trade-off is that a typo in a placeholder is silent, which is why the
-   scaffold prints the vocabulary and `cvrp validate` checks that every declared
+   scaffold prints the vocabulary and `vrpar validate` checks that every declared
    prompt exists.
 4. **Executors write to the run directory; agents write to their worktree.** The
    first draft collected executor output from the worktree too, which silently
@@ -175,10 +175,10 @@ the read order everywhere else: `worktree/data` → `worktree` → run dir.
 10. **The mock backend emits real artifacts.** A stub that prints fake costs would
     make the contract and the feasibility checker meaningless offline, so the mock
     reads `mock.template` and `mock.analysis` from the problem. That is also why
-    `cvrp start … llm.backend=mock` is the recommended first run for a new variant:
+    `vrpar start … llm.backend=mock` is the recommended first run for a new variant:
     it exercises the engine and the problem's own checks before any model spend.
 11. **No `omegaconf`.** CORAL uses it for config merging; dotlist overrides are ~30
-    lines over PyYAML (`cvrp.config.apply_overrides`). Dropping it removed a
+    lines over PyYAML (`vrpar.config.apply_overrides`). Dropping it removed a
     package with a numpy build dependency from the install path.
 
 ---
@@ -187,9 +187,9 @@ the read order everywhere else: `worktree/data` → `worktree` → run dir.
 
 | if you want | change | it will not break |
 |---|---|---|
-| a different VRP variant | `uv run cvrp new-problem …`, then `problems/<slug>/` | the engine |
+| a different VRP variant | copy `problems/cvrptw/` to `problems/<slug>/` and edit it | the engine |
 | a different baseline model | `resources.baseline_dir` + the S2 prompt | the stage machinery |
 | a parallel revision search | run N `code_revise` worktrees and pick the best by grader score | the artifact contract |
 | a stronger acceptance test | `program.best_regex`, `checks.py:verify` | the stages |
 | a different data source | `problem.yaml:data.generator` or `checks.py:build_dataset` | the executor |
-| CORAL-native scoring | `grader.entrypoint: cvrp.executor.grader:CodeGrader` from a CORAL `task.yaml` | nothing; it is the same class |
+| CORAL-native scoring | `grader.entrypoint: vrpar.executor.grader:CodeGrader` from a CORAL `task.yaml` | nothing; it is the same class |

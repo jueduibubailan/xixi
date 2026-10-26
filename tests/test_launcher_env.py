@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from cvrp.llm.claude_code import ClaudeCodeBackend
+from vrpar.llm.claude_code import ClaudeCodeBackend
 
 #: A stand-in for the CLI: it records its environment and emits one stream-json
 #: result line, which is the minimum the launcher needs to parse a turn.

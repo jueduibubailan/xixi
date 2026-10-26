@@ -1,2 +1,0 @@
-the initial process is successful, the initial cost is 0.0
-the process is successful, the best cost is 0.0

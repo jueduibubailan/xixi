@@ -14,7 +14,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
-from cvrp.llm.probe import ANTHROPIC_VERSION, _auth_headers, probe_model_endpoint
+from vrpar.llm.probe import ANTHROPIC_VERSION, _auth_headers, probe_model_endpoint
 
 #: What the fake endpoint does per request. Set by each test.
 BEHAVIOUR: dict = {"status": 200, "body": {"ok": True}, "seen": {}}

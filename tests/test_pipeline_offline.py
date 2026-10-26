@@ -17,10 +17,10 @@ from pathlib import Path
 
 import pytest
 
-from cvrp.config import get_stage, load_config
-from cvrp.pipeline import gates
-from cvrp.pipeline.orchestrator import start
 from tests.conftest import write_project
+from vrpar.config import get_stage, load_config
+from vrpar.pipeline import gates
+from vrpar.pipeline.orchestrator import start
 
 TASK_YAML = """
 task:
@@ -37,35 +37,26 @@ llm:
   model: "mock"
 
 stages:
-  - name: retrieval
-    kind: agent
-    role: "src/cvrp/roles/retrieval_agent.md"
-    produces: ["artifacts/records/retrieval.json"]
   - name: analysis
     kind: agent
-    role: "src/cvrp/roles/analysis_agent.md"
-    produces: ["artifacts/analysis/analysis.json"]
+    role: "src/vrpar/roles/analysis_agent.md"
+    produces: ["artifacts/analysis/analysis.json", "artifacts/analysis/plan.md"]
   - name: code_generation
     kind: agent
-    role: "src/cvrp/roles/code_generation_agent.md"
+    role: "src/vrpar/roles/code_generation_agent.md"
     produces: ["artifacts/generated/"]
   - name: code_error
     kind: executor
-    role: "src/cvrp/roles/code_error_agent.md"
+    role: "src/vrpar/roles/code_error_agent.md"
     produces: ["artifacts/runs/s3_run_report.json"]
     steps: [py_compile, import_probe, correspondence, smoke_run, full_run]
   - name: code_revise
     kind: agent
-    role: "src/cvrp/roles/code_revise_agent.md"
+    role: "src/vrpar/roles/code_revise_agent.md"
     produces: ["artifacts/revisions/", "artifacts/reviews/"]
   - name: feasibility
     kind: executor
-    role: "src/cvrp/roles/feasibility_agent.md"
     produces: ["artifacts/runs/s5_feasibility.json"]
-  - name: update
-    kind: agent
-    role: "src/cvrp/roles/update_agent.md"
-    produces: ["records/main"]
 
 loop:
   on: ["code_error", "code_revise"]
@@ -73,7 +64,7 @@ loop:
   max_rounds: 2
 
 grader:
-  entrypoint: "cvrp.executor.grader:CodeGrader"
+  entrypoint: "vrpar.executor.grader:CodeGrader"
   direction: "maximize"
   timeout: 300
   args:
@@ -110,41 +101,21 @@ def test_pipeline_completes_offline(project: Path, monkeypatch: pytest.MonkeyPat
     # the offline mock emits a genuinely runnable solver, so the whole chain must pass
     assert result["success"], json.dumps(state["stages"], indent=2)[:2000]
 
-    for stage in (
-        "retrieval",
-        "analysis",
-        "code_generation",
-        "code_error",
-        "feasibility",
-        "update",
-    ):
+    for stage in ("analysis", "code_generation", "code_error", "feasibility"):
         assert state["stages"][stage]["status"] == "done", stage
     assert state["stages"]["code_revise"]["status"] == "pending", "no revision should be needed"
 
-    # The records layer ran for real: five per-run records, and a knowledge base the
-    # update stage created.
-    run_id = run_dir.name
-    temp_files = {path.name for path in (project / "records" / "temp" / run_id).glob("*.json")}
-    assert {
-        "problem_description.json",
-        "new_problem_code.json",
-        "code_error.json",
-        "description_parsing.json",
-    } <= temp_files
-    assert (project / "records" / "main" / "skills" / "cvrptw_skill.md").is_file()
-    assert (project / "records" / "related" / run_id / "retrieval.json").is_file()
-
-    # Only the two reader stages carry the knowledge block. Feeding it to the code
-    # stages would lengthen their prompts and let them follow a previous run instead of
-    # this run's evidence.
+    # There is no knowledge base and no retrieval stage any more: the description goes
+    # straight to analysis, and this project must not have grown a records directory.
+    assert not (project / "records").exists(), "the memory layer was removed"
     worktrees = run_dir / "worktrees"
-    for stage in ("retrieval", "analysis"):
-        text = (worktrees / stage / "CVPR.md").read_text(encoding="utf-8")
-        assert "# Related records" in text, stage
-    for stage in ("code_generation", "code_revise", "update"):
-        path = worktrees / stage / "CVPR.md"
+    for stage in ("analysis", "code_generation", "code_error"):
+        path = worktrees / stage / "VRPAR.md"
         if path.is_file():
             assert "# Related records" not in path.read_text(encoding="utf-8"), stage
+
+    # No plan check runs any more: the run succeeds when the code runs and nothing else.
+    assert not (run_dir / "artifacts" / "reviews" / "plan_check.json").exists()
 
     assert state["best_cost"] is not None
     assert state["initial_cost"] is not None
@@ -184,33 +155,6 @@ def test_pipeline_completes_offline(project: Path, monkeypatch: pytest.MonkeyPat
     assert (final / "artifacts" / "generated" / "run.py").is_file()
     assert (final / "pomo" / "POMO" / "utils" / "utils.py").is_file()
     assert (run_dir / "REPORT.md").is_file()
-
-
-def test_the_pipeline_runs_with_an_empty_knowledge_base(
-    project: Path, monkeypatch: pytest.MonkeyPatch
-):
-    """The contract must not live in the records.
-
-    Moving problem knowledge out of the prompts and into the knowledge base is only safe
-    while the *contract* — file naming, the first-line marker, the parameter values — stays
-    in the prompt. If any of it moved, the first run of a new problem (empty `records/`)
-    would have nothing to hold the deliverable to, and this test would fail.
-    """
-    monkeypatch.chdir(project)
-    config = load_config(project / "task.yaml", cwd=project)
-    # point the knowledge base somewhere empty: a first run for a brand-new problem
-    config["records"] = dict(config.get("records") or {}, dir=str(project / "no-records-yet"))
-
-    result = start(config, results_dir=project / "results")
-    assert result["success"], json.dumps(result["state"]["stages"], indent=2)[:2000]
-
-    state = result["state"]
-    assert state["stages"]["retrieval"]["status"] == "done"
-    assert "empty" in str(state["stages"]["retrieval"]["message"])
-    # the run proceeded through the gates the contract protects, and only then wrote a
-    # knowledge base of its own for the next run to find
-    assert state["stages"]["code_error"]["status"] == "done"
-    assert (project / "no-records-yet" / "main").is_dir()
 
 
 def test_analysis_payload_comes_from_the_problem(project: Path, monkeypatch: pytest.MonkeyPatch):
@@ -260,7 +204,7 @@ def test_a_missing_deliverable_file_is_a_warning_at_the_gate(project: Path, monk
 
 
 def test_prompt_renderer_injects_every_stage_variable(project: Path, monkeypatch: pytest.MonkeyPatch):
-    from cvrp.pipeline.stages import PLACEHOLDER_RE, render_instruction
+    from vrpar.pipeline.stages import PLACEHOLDER_RE, render_instruction
 
     monkeypatch.chdir(project)
     config = load_config(project / "task.yaml", cwd=project)
@@ -299,8 +243,8 @@ def test_error_path_routes_through_revise(project: Path, monkeypatch: pytest.Mon
     error: the executor then fails at ``py_compile``, the loop's ``on`` stages
     must fire, and the second round must pass.
     """
-    from cvrp.llm.mock import MockBackend
-    from cvrp.pipeline import orchestrator as orch_mod
+    from vrpar.llm.mock import MockBackend
+    from vrpar.pipeline import orchestrator as orch_mod
 
     class BrokenFirst(MockBackend):
         name = "mock(broken)"

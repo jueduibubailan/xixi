@@ -1,9 +1,9 @@
 # Alternative task entry point (same task as the root `task.yaml`).
 #
-#   uv run cvrp start configs/tasks/cvrptw.yaml
+#   uv run vrpar start configs/tasks/cvrptw.yaml
 #
 # The canonical configuration lives at the project root so that
-#   uv run cvrp start task.yaml
+#   uv run vrpar start task.yaml
 # reads like CORAL's `coral start -c task.yaml`. This file exists to show the
 # other supported layout: a task under `configs/tasks/`.
 #
@@ -50,28 +50,28 @@ loop:
 stages:
   - name: analysis
     kind: agent
-    role: "src/cvrp/roles/analysis_agent.md"
+    role: "src/vrpar/roles/analysis_agent.md"
     schema: "problems/cvrptw/schemas/analysis.schema.json"
     produces: ["artifacts/analysis/analysis.json"]
     timeout_seconds: 1800
   - name: code_generation
     kind: agent
-    role: "src/cvrp/roles/code_generation_agent.md"
+    role: "src/vrpar/roles/code_generation_agent.md"
     produces: ["artifacts/generated/run.py"]
     timeout_seconds: 3600
   - name: code_error
     kind: executor
-    role: "src/cvrp/roles/code_error_agent.md"
+    role: "src/vrpar/roles/code_error_agent.md"
     produces: ["artifacts/runs/s3_run_report.json"]
     steps: [py_compile, import_probe, smoke_run, full_run]
   - name: code_revise
     kind: agent
-    role: "src/cvrp/roles/code_revise_agent.md"
+    role: "src/vrpar/roles/code_revise_agent.md"
     produces: ["artifacts/revisions/"]
     timeout_seconds: 3600
   - name: feasibility
     kind: executor
-    role: "src/cvrp/roles/feasibility_agent.md"
+    role: "src/vrpar/roles/feasibility_agent.md"
     produces: ["artifacts/runs/s5_feasibility.json"]
 
 workspace:

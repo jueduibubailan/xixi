@@ -3,8 +3,8 @@
 # The problem itself -- its statement, its checker, its baseline -- lives in
 # problems/cvrptw/. This file only says which size to run and how.
 #
-#   uv run cvrp start task.yaml
-#   uv run cvrp start task.yaml llm.backend=mock     # offline self-check
+#   uv run vrpar start task.yaml
+#   uv run vrpar start task.yaml llm.backend=mock     # offline self-check
 task:
   name: "CVRPTW-n20-on-POMO"
   slug: "cvrptw-n20"
@@ -34,6 +34,9 @@ llm:
 workspace:
   results_dir: "./results"
   final_dir: "./workspace/final"
+  setup:
+    - ["uv pip install torch --index-url https://download.pytorch.org/whl/cu126",
+       "uv pip install torch --index-url https://download.pytorch.org/whl/cpu"]
 
 grader:
   iterations: 1000

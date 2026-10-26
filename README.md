@@ -1,25 +1,25 @@
-# cvrp — VRP-variant code synthesis on top of a neural solver
+# vrpar — VRP-variant code synthesis on top of a neural solver
 
 A staged, multi-agent pipeline that synthesizes a solver for a **VRP variant** by adapting an
 existing neural baseline. Point it at a new variant and it will: analyse the variant into a
 machine-readable contract, generate the code, run it, attribute any failure, revise, and only
 export a result that passes an independent feasibility check.
 
-`cvrptw` is the **first example**, not the subject. The engine never names a variant: everything
+`cvrptw` is the **first example**, not the subject. The engine names no variant, and the baseline it adapts is always POMO: everything
 variant-specific lives in a *problem bundle*, and adding one is a directory rather than a change
-under `src/cvrp/`.
+under `src/vrpar/`.
 
 ```
 problems/<name>/
 ├─ task.yaml      the statement, the mechanisms, and this problem's hooks
-├─ seed/          OPTIONAL: the starting code an agent edits
+├─ seed/          OPTIONAL: this problem's notes (the baseline itself is shared)
 └─ grader/        the checker, the scorer, and the instance generator
 ```
 
 `task.yaml` doubles as a runnable task, so a problem can be run against itself:
 
 ```bash
-uv run cvrp start problems/cvrptw/task.yaml
+uv run vrpar start problems/cvrptw/task.yaml
 ```
 
 Built by fusing three codebases:
@@ -38,23 +38,19 @@ Three ship with the project:
 |---|---|
 | `problems/cvrptw` | Capacitated VRP with Time Windows, adapting POMO's CVRP solver |
 | `problems/cvrpltw` | CVRP with **Length Limit** and Time Windows — i.e. CVRPTW plus a per-route length bound |
-| `problems/_template` | **the template for a new problem**, and a deliberately trivial worked example |
 
-`problems/_template/` is the one to read first: its `task.yaml` marks the three blocks you edit,
-its `grader/template_grader.py` is an annotated hook sample, and it runs end to end offline with
-no `seed/`, no POMO and no checkpoint — which is the "solved from scratch" case.
+Every bundle adapts the **shared baseline** at the project root (`baseline/`), so a new problem
+costs a task file and a grader rather than another 15.7 MB copy of POMO.
 
 ## The pipeline
 
 ```
-retrieval        agent      pick the records this problem's run should see
 analysis         agent      variant -> machine-readable state / masks / plan
-code_generation  agent      plan + seed -> the problem's generated dir
+code_generation  agent      plan + baseline -> the problem's generated dir
 code_error       executor   py_compile -> import_probe -> correspondence -> smoke -> full run
                  (+ agent)  and, only when there is a failure to report, one narration turn
 code_revise      agent      error attribution -> minimal repair  --(loop back to code_error)
 feasibility      executor   publishes the grader's independent verdict
-update           agent      fold what was learned back into the knowledge base
 ```
 
 The loop `code_error -> code_revise -> code_error` runs until the acceptance contract passes or
@@ -74,10 +70,10 @@ Common to both tracks:
 uv sync --extra dev
 
 # generate the selected problem's data (also happens automatically on `start`)
-uv run cvrp instances
+uv run vrpar instances
 
 # watch a run
-uv run cvrp ui               # http://127.0.0.1:8420
+uv run vrpar ui               # http://127.0.0.1:8420
 ```
 
 Then pick the track that matches your machine. Both drive the same pipeline; they differ only
@@ -106,8 +102,8 @@ export ANTHROPIC_AUTH_TOKEN=...        # or ANTHROPIC_API_KEY
 the engine strips only Claude's own session markers, never your routing setup.
 
 ```bash
-uv run cvrp start task.yaml            # n=20: the fastest end-to-end signal
-uv run cvrp doctor                     # checks CLI, routing, data and prompts
+uv run vrpar start task.yaml            # n=20: the fastest end-to-end signal
+uv run vrpar doctor                     # checks CLI, routing, data and prompts
 ```
 
 Config shape:
@@ -133,16 +129,38 @@ npm install --global @deepseek-ai/dsh
 dsh --version
 
 # 2. the credential -- this is the step people miss
-$env:DEEPSEEK_API_KEY = "sk-..."        # must be in the shell that launches `cvrp`
+$env:DEEPSEEK_API_KEY = "sk-..."        # must be in the shell that launches `vrpar`
 ```
 
-`dsh_home` defaults to `.dsh` **inside the run directory**, so each run gets isolated session
-state. The consequence worth knowing: your global store at `~/.dsh/.credentials.yaml` is
-**not** consulted, and pointing `dsh_home` at `~/.dsh` does not work either, because the
-sandbox refuses writes outside the workspace. Export the environment variable instead.
+`dsh_home` is **not set by default**, so `DSH_HOME` is inherited: DSH then uses the home it
+was set up with, which is where the provider credential lives (`<home>/llm-deepseek/`).
+This matters -- redirecting `DSH_HOME` at a fresh directory per run hides that store, and
+every turn dies with:
+
+```
+dsh: MISSING_CREDENTIAL: llm-deepseek: no API key for provider route "deepseek-official"
+```
+
+Before launching, the backend **probes** the inherited home by creating `profiles/<profile>`
+there -- the exact mkdir DSH performs at boot. If that fails (a restricted token, an ACL that
+grants only read, a home on a read-only mount), DSH would die with `EPERM ... mkdir` before
+any model call, so the backend falls back to a run-local `.dsh` and writes the reason into
+the agent log (`# note: ...`). The fallback has no credential store, so it needs
+`DEEPSEEK_API_KEY` in the launching shell.
+
+Two ways out, pick whichever fits:
 
 ```powershell
-uv run cvrp start task.yaml             # n=20 first, not n=100
+# A. let DSH use the credential it already has: make its home writable from the same
+#    terminal you launch vrpar from  (needs to succeed outside any sandboxed shell)
+mkdir "$env:USERPROFILE\.dsh\profiles\headless"
+
+# B. keep the run isolated and authenticate with the environment variable
+$env:DEEPSEEK_API_KEY = "sk-..."
+```
+
+```powershell
+uv run vrpar start task.yaml             # n=20 first, not n=100
 ```
 
 Config shape:
@@ -152,7 +170,8 @@ llm:
   backend: "dsh"
   runtime: "dsh"
   dsh_bin: "dsh"
-  dsh_home: ".dsh"              # run-local: isolated, and inside the workspace
+  # dsh_home: omit it -> DSH_HOME is inherited and the stored credential is found.
+  # Set it only to isolate a run, and then export DEEPSEEK_API_KEY as well.
   inherit_routing_env: true     # passes DEEPSEEK_API_KEY through
   timeout_seconds: 3600
   runtime_options:
@@ -183,7 +202,7 @@ Two more differences from Track A, both easy to trip over:
 ### Offline smoke test (both tracks)
 
 ```bash
-uv run cvrp start task.yaml llm.backend=mock records.dir=./records-smoke \
+uv run vrpar start task.yaml llm.backend=mock \
                  workspace.results_dir=./results-smoke
 ```
 
@@ -191,24 +210,23 @@ The mock backend emits the problem's `mock.template` — a small but genuinely r
 and the problem's `mock.analysis` payload, so the acceptance contract and the feasibility
 checker are exercised for real without a model, and without any of the setup above.
 
-Pass a scratch `records.dir` and `workspace.results_dir`: an offline run writes to `records/`
-by default, and the curated knowledge base is not a scratch space.
+Pass a scratch `workspace.results_dir`: an offline run writes into `results/` by
+default, and keeping it separate makes a test run easy to tell from a real one.
 
 ## Adding a new problem
 
 ```bash
-cp -r problems/_template problems/myproblem
+cp -r problems/cvrptw problems/myproblem
 $EDITOR problems/myproblem/task.yaml
 
-uv run cvrp validate problems/myproblem/task.yaml
-uv run cvrp start    problems/myproblem/task.yaml llm.backend=mock \
-                     records.dir=./records-smoke workspace.results_dir=./results-myproblem
+uv run vrpar validate problems/myproblem/task.yaml
+uv run vrpar start    problems/myproblem/task.yaml llm.backend=mock \
+                     workspace.results_dir=./results-myproblem
 ```
 
 Edit three blocks in `task.yaml`: `problem:` (identity and hooks), `generated:` (what the
 deliverable looks like), and `data:` + `grader:` (where instances come from and how a run is
-judged). `docs/new_problem.md` has the full walkthrough; `problems/_template/README.md` has the
-short version plus the exact hook signatures.
+judged). `docs/new_problem.md` has the full walkthrough, including the exact hook signatures.
 
 What each piece buys you:
 
@@ -217,39 +235,35 @@ What each piece buys you:
 | `task.yaml` | **yes** | the directory is not a problem at all |
 | `grader/` with `verify()` | **effectively yes** | the engine falls back to "dump exists and parses as JSON": the contract can pass while the answer is *wrong* |
 | a generator (`build_dataset()` or `data.generator`) | to run | no evaluation instances, so the full run has nothing to execute |
-| `seed/` | no | a problem solved from scratch needs none; leave `generated.correspondence` empty |
+| `seed/` | no | holds this problem's `README.baseline.md` and marks the directory as a bundle; leave `generated.correspondence` empty |
 | `mock_analysis.json` + `mock_solver.py` | no | only affects `llm.backend=mock` |
 
 ## Commands
 
 | command | what it does |
 |---|---|
-| `cvrp start [task.yaml] [k=v ...]` | run the pipeline |
-| `cvrp ui [--port 8420]` | dashboard (stages, artifacts, records, logs, steering) |
-| `cvrp doctor [--probe]` | check the runtime prerequisites |
-| `cvrp status` | stage table for the latest run |
-| `cvrp stages` | the stage table (including each stage's mechanism label) |
-| `cvrp stage <name>` | re-run ONE stage of an existing run (debugging) |
-| `cvrp log [-n N]` | tail `logs/pipeline.log` |
-| `cvrp show <path>` | print a run artifact |
-| `cvrp grader [--json]` | re-run the exit gate on the latest run |
-| `cvrp instances [--force]` | (re)generate the problem's data |
-| `cvrp validate [task.yaml]` | check the config and the problem it selects |
-| `cvrp clean [--all]` | remove run directories |
-| `cvrp problems` | list the problem bundles this project can build |
-| `cvrp new-problem <slug>` | scaffold a problem — see the note below |
-| `cvrp version` | print the version |
+| `vrpar start [task.yaml] [k=v ...]` | run the pipeline |
+| `vrpar ui [--port 8420]` | dashboard (stages, artifacts, logs, steering) |
+| `vrpar doctor [--probe]` | check the runtime prerequisites |
+| `vrpar status` | stage table for the latest run |
+| `vrpar stages` | the stage table (including each stage's mechanism label) |
+| `vrpar stage <name>` | re-run ONE stage of an existing run (debugging) |
+| `vrpar log [-n N]` | tail `logs/pipeline.log` |
+| `vrpar show <path>` | print a run artifact |
+| `vrpar grader [--json]` | re-run the exit gate on the latest run |
+| `vrpar instances [--force]` | (re)generate the problem's data |
+| `vrpar validate [task.yaml]` | check the config and the problem it selects |
+| `vrpar clean [--all]` | remove run directories |
+| `vrpar problems` | list the problem bundles this project can build |
+| `vrpar version` | print the version |
 
 Any `k=v` argument is a dotlist override, CORAL-style:
 
 ```bash
-uv run cvrp start task.yaml llm.model=sonnet loop.max_rounds=8 run.verbose=true
+uv run vrpar start task.yaml llm.model=sonnet loop.max_rounds=8 run.verbose=true
 ```
 
-> **`cvrp new-problem` is behind the bundle refactor.** It still writes the older
-> `problem.yaml` + `prompts/` + `checks.py` shape, which `load_problem` still reads but which is
-> no longer how a new problem should be written. Prefer copying `problems/_template/`. The
-> scaffold is scheduled to be repointed at the bundle shape.
+
 
 ## Layout
 
@@ -259,7 +273,7 @@ new/
 ├─ task_n50.yaml             # thin variants: the same bundle at another scale
 ├─ task_n100.yaml
 ├─ configs/default.yaml      # global defaults (model, timeouts, budgets)
-├─ src/cvrp/
+├─ src/vrpar/
 │  ├─ bundle.py              # what a problem bundle is; `stages: default` expansion
 │  ├─ problems/              # the loader + hook contract (no problem data lives here)
 │  ├─ pipeline/              # spec (stage table), orchestrator, stages, gates
@@ -269,11 +283,11 @@ new/
 │  ├─ web/                   # dashboard
 │  ├─ prompts/               # the engine's shared prompt pack (a problem may override one)
 │  └─ roles/                 # engine-shipped agent roles
-├─ problems/                 # the bundles: cvrptw, cvrpltw, _template
+├─ baseline/                 # POMO + the CVRP100 checkpoint: one copy, shared by every problem
+├─ problems/                 # the bundles: cvrptw, cvrpltw, cvrpltw_n50, cvrpltw_n100
 ├─ instances/data/<slug>/    # generated data (regenerable)
 ├─ workspace/final/          # export target
 ├─ results/                  # one directory per run
-├─ records/main/             # the durable knowledge base
 ├─ tests/                    # offline pipeline, gates, bundles, executor, web
 └─ docs/
 ```
@@ -293,32 +307,22 @@ A generated program passes when:
 The program name, its CLI flags, the wording of the contract and the meaning of "feasible" all
 come from the problem. The engine only enforces the shape.
 
-## Knowledge base
-
-`records/main/` is the durable part: hand-curated skills, notes and attempts, split by scope
-(`_global_*.md` for anything reusable, `<tag>_*.md` for one problem). Each run's own evidence
-lives under `records/temp/<run-id>/` and `records/related/<run-id>/`, which are not worth
-committing.
-
-Only `retrieval` and `analysis` see records, and retrieval never blocks a run: a run with an
-empty knowledge base behaves exactly like one with a full one, minus the context.
-
 ## Where to change things
 
 | you want to | edit |
 |---|---|
-| solve a different problem | copy `problems/_template/`, then edit its `task.yaml` |
+| solve a different problem | copy `problems/cvrptw/`, then edit its `task.yaml` |
 | change one stage's prompt | drop `prompts/<basename>.md` into your bundle |
-| change a stage's mechanism or budget | `src/cvrp/pipeline/spec.py` (or override that stage in `task.yaml`) |
+| change a stage's mechanism or budget | `src/vrpar/pipeline/spec.py` (or override that stage in `task.yaml`) |
 | change how instances are generated | `grader/<name>_gen.py` + `task.yaml:problem.data` |
 | change what "feasible" means | `grader/<name>.py:verify` |
 | change scoring | `task.yaml:problem.scorer` or the grader's `score` |
-| change the exit gate | `task.yaml:grader` + `src/cvrp/executor/` |
-| change the dashboard | `src/cvrp/web/` |
+| change the exit gate | `task.yaml:grader` + `src/vrpar/executor/` |
+| change the dashboard | `src/vrpar/web/` |
 
 See `DESIGN.md` for the concept mapping and the load-bearing decisions, `docs/run_flow.md` for
 the stage-by-stage data flow, `docs/new_problem.md` for the variant-authoring walkthrough,
-`docs/records.md` for the knowledge base, and `docs/faq.md` for the rest.
+`docs/faq.md` for the rest.
 
 ## Runtimes
 
@@ -332,11 +336,11 @@ the stage-by-stage data flow, `docs/new_problem.md` for the variant-authoring wa
 | `mock` | any | offline: no model, exercises the whole pipeline |
 
 The runtime is a property of the task, not of the code: `llm.backend` selects it and nothing
-under `src/cvrp/` branches on a variant. Switching a task between Track A and Track B is a
+under `src/vrpar/` branches on a variant. Switching a task between Track A and Track B is a
 `llm:` edit, and `runtime_options.*` is how a setting that only one runtime understands is
 kept out of the other's way.
 
 A preflight would be kinder than the failures above — the credential and the
 `permission_mode` value can both be checked before a run starts, instead of surfacing as a
 failed agent turn after the first stage has been paid for. That is not implemented yet;
-`uv run cvrp doctor` is the closest thing today.
+`uv run vrpar doctor` is the closest thing today.

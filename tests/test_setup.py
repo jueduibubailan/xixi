@@ -13,8 +13,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from cvrp.executor.contract import import_probe
-from cvrp.run.setup import run_setup, setup_commands
+from vrpar.executor.contract import import_probe
+from vrpar.run.setup import run_setup, setup_commands
 
 # --------------------------------------------------------------------------- #
 # workspace.setup
@@ -24,10 +24,13 @@ from cvrp.run.setup import run_setup, setup_commands
 def test_setup_commands_reads_both_shapes():
     assert setup_commands({}) == []
     assert setup_commands({"workspace": {}}) == []
-    assert setup_commands({"workspace": {"setup": "echo hi"}}) == ["echo hi"]
-    assert setup_commands({"workspace": {"setup": ["a", "b"]}}) == ["a", "b"]
+    assert setup_commands({"workspace": {"setup": "echo hi"}}) == [["echo hi"]]
+    assert setup_commands({"workspace": {"setup": ["a", "b"]}}) == [["a"], ["b"]]
     # blank entries are not commands
-    assert setup_commands({"workspace": {"setup": ["a", "  "]}}) == ["a"]
+    assert setup_commands({"workspace": {"setup": ["a", "  "]}}) == [["a"]]
+    # an entry may list alternatives, tried in order (CUDA wheel, then CPU wheel)
+    assert setup_commands({"workspace": {"setup": [["gpu", "cpu"]]}}) == [["gpu", "cpu"]]
+    assert setup_commands({"workspace": {"setup": [["gpu", " "], "x"]}}) == [["gpu"], ["x"]]
 
 
 def test_setup_nothing_declared_is_a_no_op(scratch: Path):
@@ -45,7 +48,7 @@ def test_setup_runs_once_and_then_skips(scratch: Path, monkeypatch):
         seen.append(list(argv))
         return type("P", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 
-    monkeypatch.setattr("cvrp.run.setup.subprocess.run", fake_run)
+    monkeypatch.setattr("vrpar.run.setup.subprocess.run", fake_run)
     config = {"_project_root": str(scratch), "workspace": {"setup": [f"{sys.executable} -c pass"]}}
 
     first = run_setup(config)
@@ -65,7 +68,7 @@ def test_changed_commands_invalidate_the_fingerprint(scratch: Path, monkeypatch)
     import sys
 
     monkeypatch.setattr(
-        "cvrp.run.setup.subprocess.run",
+        "vrpar.run.setup.subprocess.run",
         lambda argv, **kwargs: type("P", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
     )
     config = {"_project_root": str(scratch), "workspace": {"setup": [f"{sys.executable} -c pass"]}}
@@ -80,7 +83,7 @@ def test_setup_failures_are_reported_not_raised(scratch: Path, monkeypatch):
     def failing(argv, **kwargs):
         return type("P", (), {"returncode": 1, "stdout": "", "stderr": "resolution impossible"})()
 
-    monkeypatch.setattr("cvrp.run.setup.subprocess.run", failing)
+    monkeypatch.setattr("vrpar.run.setup.subprocess.run", failing)
     import sys
 
     result = run_setup({"_project_root": str(scratch), "workspace": {"setup": [f"{sys.executable} -c pass"]}})
@@ -88,7 +91,7 @@ def test_setup_failures_are_reported_not_raised(scratch: Path, monkeypatch):
     assert result.ok is False
     assert "resolution impossible" in result.failures[0]
     # a failed run must not leave a fingerprint behind, or it would never retry
-    assert not (scratch / ".cvrp" / "setup.json").exists()
+    assert not (scratch / ".vrpar" / "setup.json").exists()
 
 
 def test_a_command_that_is_not_on_path_is_reported(scratch: Path):
@@ -109,7 +112,7 @@ def test_setup_targets_the_running_environment(scratch: Path, monkeypatch):
         captured.update(kwargs)
         return type("P", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 
-    monkeypatch.setattr("cvrp.run.setup.subprocess.run", fake_run)
+    monkeypatch.setattr("vrpar.run.setup.subprocess.run", fake_run)
     run_setup({"_project_root": str(scratch), "workspace": {"setup": ["uv pip install nothing"]}})
 
     env = captured["env"]
@@ -128,7 +131,7 @@ def test_a_plain_python_command_is_resolved_to_this_interpreter(scratch: Path, m
         captured["argv"] = argv
         return type("P", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 
-    monkeypatch.setattr("cvrp.run.setup.subprocess.run", fake_run)
+    monkeypatch.setattr("vrpar.run.setup.subprocess.run", fake_run)
     run_setup({"_project_root": str(scratch), "workspace": {"setup": ["python -m pip install x"]}})
     assert Path(captured["argv"][0]).resolve() == Path(sys.executable).resolve()
 
@@ -201,14 +204,13 @@ def test_the_staged_baseline_imports_with_the_documented_bootstrap():
     import subprocess
     import sys
 
-    from cvrp.problems import load_problem
-    from tests.conftest import PACKAGE_PROBLEMS
+    from tests.conftest import PACKAGE_PROBLEMS, baseline_of
+    from vrpar.problems import load_problem
 
     plugin = load_problem(PACKAGE_PROBLEMS / "cvrptw", slug="cvrptw")
-    baseline = Path(plugin.root) / str(
-        (plugin.spec.get("resources") or {}).get("baseline_dir") or "."
-    )
-    pomo = baseline / "pomo"
+    # The baseline is shared by every problem and lives at the project root; `baseline_of`
+    # resolves it the same way the seeder does.
+    pomo = baseline_of(plugin) / "pomo"
     script = (
         "import sys\n"
         f"sys.path.insert(0, {str(pomo.parent)!r})\n"

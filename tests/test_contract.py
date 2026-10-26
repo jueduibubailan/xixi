@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from cvrp.executor.contract import Contract, classify_error, condense, find_instances
+from vrpar.executor.contract import Contract, classify_error, condense, find_instances
 
 
 def test_contract_parses_both_lines():

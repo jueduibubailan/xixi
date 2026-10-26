@@ -1,7 +1,7 @@
 # CVRPTW at n=100: a thin task over the problem bundle in problems/cvrptw/.
 #
-#   uv run cvrp start task_n100.yaml
-#   uv run cvrp start task_n100.yaml llm.backend=mock     # offline self-check
+#   uv run vrpar start task_n100.yaml
+#   uv run vrpar start task_n100.yaml llm.backend=mock     # offline self-check
 task:
   name: "CVRPTW-n100-on-POMO"
   slug: "cvrptw-n100"
@@ -31,7 +31,10 @@ llm:
   backend: "dsh"
   runtime: "dsh"
   dsh_bin: "dsh"
-  dsh_home: ".dsh"
+  # dsh_home is deliberately NOT set: leaving DSH_HOME unset lets DSH use its real home,
+  # which is where the DeepSeek credential lives (`<home>/llm-deepseek/`). Setting it to a
+  # per-run `.dsh` isolates the run's session state but hides that store, and every turn
+  # then fails with `MISSING_CREDENTIAL` unless DEEPSEEK_API_KEY is exported.
   inherit_routing_env: true      # 让 DEEPSEEK_API_KEY 被继承
   timeout_seconds: 3600
   runtime_options:
@@ -44,6 +47,9 @@ llm:
 workspace:
   results_dir: "./results"
   final_dir: "./workspace/final"
+  setup:
+    - ["uv pip install torch --index-url https://download.pytorch.org/whl/cu126",
+       "uv pip install torch --index-url https://download.pytorch.org/whl/cpu"]
 
 grader:
   iterations: 1000

@@ -1,4 +1,4 @@
-"""Problem-plugin tests: loading, hooks, path resolution, and scaffolding.
+"""Problem-plugin tests: loading, hooks and path resolutioning.
 
 These are the tests that keep the engine variant-agnostic. If someone
 re-introduces a hardcoded variant name in the core, the "new problem" test below
@@ -13,16 +13,15 @@ from pathlib import Path
 
 import pytest
 
-from cvrp.config import ConfigError, load_config
-from cvrp.problems import (
+from tests.conftest import PACKAGE_PROBLEMS, baseline_of, write_project
+from vrpar.config import ConfigError, load_config
+from vrpar.problems import (
     DEFAULT_BEST_REGEX,
     ProblemError,
     find_problem_dir,
     list_problems,
     load_problem,
 )
-from cvrp.problems.scaffold import scaffold_problem
-from tests.conftest import PACKAGE_PROBLEMS, baseline_of, write_project
 
 TASK_YAML = """
 task:
@@ -65,7 +64,7 @@ def test_every_stage_prompt_resolves_to_a_readable_file():
     name resolves to a non-empty file: a missing prompt renders an empty instruction, and
     that failure mode costs a whole run.
     """
-    from cvrp.pipeline.stages import STAGE_PROMPT_KEYS
+    from vrpar.pipeline.stages import STAGE_PROMPT_KEYS
 
     plugin = load_problem(PACKAGE_PROBLEMS / "cvrptw", slug="cvrptw")
     for stage, key in STAGE_PROMPT_KEYS.items():
@@ -74,13 +73,7 @@ def test_every_stage_prompt_resolves_to_a_readable_file():
         assert path.read_text(encoding="utf-8").strip(), f"{stage} prompt is empty"
 
     # prompts a stage asks for by an explicit key rather than by stage name
-    for key in (
-        "analysis_judge",
-        "codegen_judge",
-        "error_narrate",
-        "code_review",
-        "error_analyse",
-    ):
+    for key in ("code_review",):
         assert Path(plugin.prompt(key)).is_file(), key
 
 
@@ -292,7 +285,7 @@ def test_list_problems_finds_the_bundles():
 
 
 def test_contract_reads_cli_and_regex_from_the_problem(scratch: Path):
-    from cvrp.executor.contract import Contract
+    from vrpar.executor.contract import Contract
 
     project = write_project(scratch / "project", TASK_YAML, problem="cvrptw")
     config = load_config(project / "task.yaml", cwd=project)
@@ -309,33 +302,6 @@ def test_contract_reads_cli_and_regex_from_the_problem(scratch: Path):
 # --------------------------------------------------------------------------- #
 # scaffolding: the "add a new variant" path
 # --------------------------------------------------------------------------- #
-
-
-def test_scaffold_produces_a_loadable_problem(scratch: Path):
-    target = scratch / "problems" / "my-variant"
-    written = scaffold_problem(
-        slug="my-variant",
-        name="My Variant",
-        target=target,
-        description="A variant with drones and time windows.",
-        variant_label="MyVariant-on-POMO",
-        baseline="./baseline",
-    )
-    assert written
-    assert (target / "problem.yaml").is_file()
-    assert (target / "checks.py").is_file()
-    assert (target / "prompts" / "s1_analysis.md").is_file()
-
-    plugin = load_problem(target, slug="my-variant")
-    assert plugin.name == "My Variant"
-    assert plugin.spec["variant_label"] == "MyVariant-on-POMO"
-    assert plugin.program == "run.py"
-    assert Path(plugin.prompt("analysis")).is_file()
-    # the description is embedded in the prompts, so the agents see the variant
-    assert "drones" in Path(plugin.prompt("analysis")).read_text(encoding="utf-8")
-    assert "drones" in Path(plugin.prompt("codegen")).read_text(encoding="utf-8")
-
-
 def test_the_staged_baseline_is_importable_as_staged():
     """The staged layout must actually work, helpers included.
 
@@ -409,85 +375,23 @@ def test_the_spec_and_prompts_encode_the_deliverable_contract():
 
 def test_judge_and_revise_prompts_share_the_deliverable_rules():
     plugin = load_problem(PACKAGE_PROBLEMS / "cvrptw", slug="cvrptw")
-    judge = Path(plugin.prompt("codegen_judge")).read_text(encoding="utf-8")
-    assert "File set and naming" in judge
-    assert "named after the *baseline*" in judge
-    assert "Correspondence lines" in judge
-    assert "Parameter values" in judge
-    assert "Style fidelity" in judge
 
     revise = Path(plugin.prompt("revise")).read_text(encoding="utf-8")
     assert "may **not** add a new module" in revise
     assert "already installed" in revise
     assert "correspondence" in revise
 
-    analyse = Path(plugin.prompt("error_analyse")).read_text(encoding="utf-8")
-    assert "path problem, not a missing package" in analyse
-    assert "FileNotFoundError" in analyse
-
     review = Path(plugin.prompt("code_review")).read_text(encoding="utf-8")
     assert "Read every file in the deliverable" in review
     assert "missing_symbol" in review
     assert "Do not edit any code in this step" in review
 
-
-def test_scaffold_prompts_render_through_the_engine(scratch: Path):
-    """A scaffolded problem's prompts must render with real values, not braces.
-
-    The scaffold's own guidance comments mention the placeholder vocabulary on
-    purpose, and the renderer blanks unknown placeholders, so the assertion is
-    about the *content* placeholders: the variant description and the stage's
-    declared outputs must reach the agent.
-    """
-    from cvrp.pipeline.stages import render_instruction
-
-    target = scratch / "problems" / "scaffolded"
-    scaffold_problem(
-        slug="scaffolded",
-        name="Scaffolded Variant",
-        target=target,
-        description="A variant with drones and soft time windows.",
-        variant_label="Scaffolded-on-POMO",
-    )
-    plugin = load_problem(target, slug="scaffolded")
-    config = {
-        "_problem": plugin,
-        "_project_root": str(scratch),
-        "_task_dir": str(scratch),
-        "problem": {"slug": "scaffolded"},
-        "task": {"name": "t", "description": "task level description"},
-        "llm": {"model": "m"},
-    }
-    text = render_instruction(
-        {"name": "analysis", "kind": "agent", "produces": ["artifacts/analysis/analysis.json"]},
-        config,
-        worktree=scratch / "wt",
-        run_dir=scratch / "run",
-    )
-    assert "Scaffolded Variant" in text
-    assert "drones and soft time windows" in text
-    assert "artifacts/analysis/analysis.json" in text
-    assert "{task_description}" not in text
-
-
-def test_scaffold_refuses_and_then_overwrites(scratch: Path):
-    target = scratch / "problems" / "dup"
-    scaffold_problem(slug="dup", name="Dup", target=target)
-    scaffold_problem(slug="dup", name="Dup", target=target, force=True)
-    assert (target / "problem.yaml").is_file()
-
-
-def test_scaffolded_problem_is_listed_and_configurable(scratch: Path):
-    project = scratch / "project"
-    (project / "configs").mkdir(parents=True)
-    scaffold_problem(slug="brand-new", name="Brand New", target=project / "problems" / "brand-new")
-    task = TASK_YAML.replace("cvrptw", "brand-new")
-    (project / "task.yaml").write_text(task, encoding="utf-8")
-    config = load_config(project / "task.yaml", cwd=project)
-    assert config["_problem"].slug == "brand-new"
-    assert "brand-new" in list_problems(config)
-
-
+    # The plan check was removed: no prompt may tell an agent to consult its verdict, and
+    # the prompt file itself must be gone.
+    for name in ("revise", "code_review", "codegen", "analysis"):
+        body = Path(plugin.prompt(name)).read_text(encoding="utf-8")
+        assert "plan_check" not in body, name
+    assert plugin.prompt("plan_check") == ""
 # --------------------------------------------------------------------------- #
 # helpers
 # --------------------------------------------------------------------------- #

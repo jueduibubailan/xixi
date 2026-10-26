@@ -5,10 +5,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from cvrp.pipeline import gates
-from cvrp.problems import load_problem
-from cvrp.run.run_dir import write_json
 from tests.conftest import PACKAGE_PROBLEMS
+from vrpar.pipeline import gates
+from vrpar.problems import load_problem
+from vrpar.run.run_dir import write_json
 
 PROBLEM = load_problem(PACKAGE_PROBLEMS / "cvrptw", slug="cvrptw")
 
@@ -31,12 +31,11 @@ def _good_analysis() -> dict:
         "objective": "minimize distance",
         "output_contract": ["a", "b"],
         "pomo_modification_plan": [{"file": "pomo/POMO/CVRPEnv.py", "change": "add mask"}],
-    "related_knowledge": {
-        "used": [],
-        "rejected": [],
-        "note": "fixture: the knowledge base is empty in this test",
-    },
         "checkpoint_compatibility": {"encoder_input_dim_must_stay": 2},
+        "run_plan": [
+            {"step": 1, "action": "add the window mask", "file": "pomo/POMO/CVRPEnv.py"},
+            {"step": 2, "action": "confirm the contract lines", "command": "python run.py"},
+        ],
     }
 
 
@@ -113,14 +112,19 @@ def test_run_report_gate_reads_the_executor_report(scratch: Path):
     assert gates.gate_run_report({"passed": True, "best_cost": 3.2}).passed
 
 
-def test_feasibility_gate_treats_skip_as_a_warning(scratch: Path):
-    assert not gates.gate_feasibility({}).passed
+def test_feasibility_gate_records_but_does_not_block(scratch: Path):
+    # A missing verdict is a warning, not a failure: the run's contract is "the code runs
+    # and follows the plan", and grading is a measurement on top of that.
+    assert gates.gate_feasibility({}).passed
     skipped = gates.gate_feasibility({"skipped": True, "feasible": False})
     assert skipped.passed
     assert skipped.warnings
-    failed = gates.gate_feasibility({"feasible": False, "violations": ["customer 4 arrived late"]})
-    assert not failed.passed
-    assert failed.issues == ["customer 4 arrived late"]
+    infeasible = gates.gate_feasibility(
+        {"feasible": False, "violations": ["customer 4 arrived late"]}
+    )
+    # Recorded, not blocking: the verdict reaches the report as a warning.
+    assert infeasible.passed
+    assert any("customer 4 arrived late" in warning for warning in infeasible.warnings)
 
 
 def test_gate_result_serialises(scratch: Path):

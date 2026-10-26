@@ -15,8 +15,8 @@ from pathlib import Path
 
 import pytest
 
-from cvrp.problems import load_problem
 from tests.conftest import PACKAGE_PROBLEMS
+from vrpar.problems import load_problem
 
 _PLUGIN = load_problem(PACKAGE_PROBLEMS / "cvrptw", slug="cvrptw")
 _GRADER = _PLUGIN.checks_module

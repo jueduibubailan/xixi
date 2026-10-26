@@ -8,7 +8,7 @@ in place. If the gate only checked the artifact's contents, an agent that crashe
 the previous round's result would be carried forward as the current one.
 
 The mechanism is a *content* snapshot taken just before the agent runs
-(`cvrp.run.worktree.write_baseline`), not a timestamp comparison: a worktree can be
+(`vrpar.run.worktree.write_baseline`), not a timestamp comparison: a worktree can be
 recreated, and seeding preserves mtimes through ``copy2``.
 """
 
@@ -17,11 +17,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from cvrp.pipeline import gates
-from cvrp.problems import load_problem
-from cvrp.run.run_dir import write_json
-from cvrp.run.worktree import read_baseline, write_baseline
 from tests.conftest import PACKAGE_PROBLEMS
+from vrpar.pipeline import gates
+from vrpar.problems import load_problem
+from vrpar.run.run_dir import write_json
+from vrpar.run.worktree import read_baseline, write_baseline
 
 PROBLEM = load_problem(PACKAGE_PROBLEMS / "cvrptw", slug="cvrptw")
 
@@ -36,11 +36,10 @@ GOOD_ANALYSIS = {
     "objective": "minimize distance",
     "output_contract": ["a", "b"],
     "pomo_modification_plan": [{"file": "pomo/POMO/CVRPEnv.py", "change": "add mask"}],
-    "related_knowledge": {
-        "used": [],
-        "rejected": [],
-        "note": "fixture: the knowledge base is empty in this test",
-    },
+        "run_plan": [
+            {"step": 1, "action": "add the window mask", "file": "pomo/POMO/CVRPEnv.py"},
+        ],
+
     "checkpoint_compatibility": {"encoder_input_dim_must_stay": 2},
 }
 
@@ -51,7 +50,7 @@ GOOD_ANALYSIS = {
 
 
 def test_changed_since_snapshot_detects_new_modified_and_removed_files(scratch: Path):
-    from cvrp.run.worktree import changed_since_snapshot
+    from vrpar.run.worktree import changed_since_snapshot
 
     worktree = scratch / "wt"
     target = worktree / "artifacts" / "analysis"
@@ -85,7 +84,7 @@ def test_changed_since_snapshot_detects_new_modified_and_removed_files(scratch: 
 
 def test_empty_baseline_never_fails_a_stage(scratch: Path):
     """No snapshot taken means the caller's field checks stay in charge."""
-    from cvrp.run.worktree import changed_since_snapshot
+    from vrpar.run.worktree import changed_since_snapshot
 
     worktree = scratch / "wt"
     (worktree / "artifacts" / "analysis").mkdir(parents=True)
@@ -94,7 +93,7 @@ def test_empty_baseline_never_fails_a_stage(scratch: Path):
 
 def test_snapshot_survives_an_unreadable_file(scratch: Path, monkeypatch):
     """A snapshot must never be the reason a run fails."""
-    from cvrp.run import worktree as wt
+    from vrpar.run import worktree as wt
 
     target = scratch / "wt" / "artifacts" / "analysis"
     target.mkdir(parents=True)
@@ -231,7 +230,7 @@ class _SilentBackend:
     name = "silent"
 
     def run(self, prompt, cwd, log_path, timeout_s=60):
-        from cvrp.llm.base import LLMResult
+        from vrpar.llm.base import LLMResult
 
         return LLMResult(
             returncode=127,
@@ -250,8 +249,8 @@ def _project(scratch: Path) -> Path:
 
 def test_replay_with_a_silent_agent_fails_instead_of_reusing_the_old_artifact(scratch: Path):
     """The real-world failure, through the actual replay entry point."""
-    from cvrp.config import load_config
-    from cvrp.pipeline.orchestrator import replay_stage, start
+    from vrpar.config import load_config
+    from vrpar.pipeline.orchestrator import replay_stage, start
 
     project = _project(scratch)
     monkeypatch = __import__("pytest").MonkeyPatch()
@@ -262,7 +261,7 @@ def test_replay_with_a_silent_agent_fails_instead_of_reusing_the_old_artifact(sc
         run_dir = Path(first["run_dir"])
         assert (run_dir / "artifacts" / "analysis" / "analysis.json").is_file()
 
-        from cvrp.pipeline import orchestrator as orch_mod
+        from vrpar.pipeline import orchestrator as orch_mod
 
         original = orch_mod.Orchestrator.__init__
 
@@ -283,15 +282,15 @@ def test_replay_with_a_silent_agent_fails_instead_of_reusing_the_old_artifact(sc
 
 def test_silent_agent_from_a_clean_run_reports_missing_not_stale(scratch: Path):
     """On the first attempt there is nothing to be stale, so say 'missing'."""
-    from cvrp.config import load_config
-    from cvrp.pipeline.orchestrator import start
+    from vrpar.config import load_config
+    from vrpar.pipeline.orchestrator import start
 
     project = _project(scratch)
     monkeypatch = __import__("pytest").MonkeyPatch()
     monkeypatch.chdir(project)
     try:
         config = load_config(project / "task.yaml", cwd=project)
-        from cvrp.pipeline import orchestrator as orch_mod
+        from vrpar.pipeline import orchestrator as orch_mod
 
         original = orch_mod.Orchestrator.__init__
 

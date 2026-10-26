@@ -14,8 +14,8 @@ from pathlib import Path
 
 import pytest
 
-from cvrp.executor.contract import agent_failure_hint, classify_error
-from cvrp.llm.claude_code import ROUTING_VARS, SESSION_MARKERS, _clean_env, routing_summary
+from vrpar.executor.contract import agent_failure_hint, classify_error
+from vrpar.llm.claude_code import ROUTING_VARS, SESSION_MARKERS, _clean_env, routing_summary
 
 
 @pytest.fixture()
@@ -72,7 +72,7 @@ def test_routing_summary_says_direct_when_no_base_url(monkeypatch: pytest.Monkey
 # --------------------------------------------------------------------------- #
 
 AUTH_403_LOG = (
-    '# cvrp agent turn\n# model: deepseek-flash\n'
+    '# vrpar agent turn\n# model: deepseek-flash\n'
     '[claude-code:unrecognized_model] {"model":"deepseek-flash","query_source":"sdk"}\n'
     '{"error":"authentication_failed","api_error_status":403,'
     '"result":"Failed to authenticate. API Error: 403 Request not allowed"}\n'
@@ -88,7 +88,7 @@ def test_agent_auth_failures_are_classified_as_environment_problems():
 def test_auth_hint_explains_the_router_requirement():
     hint = agent_failure_hint(AUTH_403_LOG)
     assert "ANTHROPIC_BASE_URL" in hint
-    assert "cvrp doctor" in hint
+    assert "vrpar doctor" in hint
 
 
 def test_auth_hint_covers_credentials_and_missing_cli():
@@ -103,8 +103,8 @@ def test_auth_hint_is_quiet_for_ordinary_output():
 
 def test_stage_notes_include_the_hint_on_an_auth_failure(scratch: Path):
     """The pipeline's own notes must not leave the user guessing."""
-    from cvrp.llm.base import LLMBackend, LLMResult
-    from cvrp.pipeline.stages import run_agent_stage
+    from vrpar.llm.base import LLMBackend, LLMResult
+    from vrpar.pipeline.stages import run_agent_stage
 
     class AuthFailing(LLMBackend):
         name = "claude_code"
@@ -138,4 +138,4 @@ def test_stage_notes_include_the_hint_on_an_auth_failure(scratch: Path):
     )
     joined = " ".join(outcome.notes)
     assert "ANTHROPIC_BASE_URL" in joined
-    assert "cvrp doctor" in joined
+    assert "vrpar doctor" in joined

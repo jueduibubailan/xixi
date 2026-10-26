@@ -20,9 +20,9 @@ from pathlib import Path
 
 import pytest
 
-from cvrp.problems import load_problem
 from tests.conftest import PACKAGE_PROBLEMS, baseline_of
 from tests.test_pipeline_offline import TASK_YAML
+from vrpar.problems import load_problem
 
 PROBLEM = load_problem(PACKAGE_PROBLEMS / "cvrptw", slug="cvrptw")
 
@@ -78,8 +78,8 @@ def test_the_bundled_payload_is_the_runtime_import_surface():
 
 
 def _run_export(project: Path, monkeypatch) -> Path:
-    from cvrp.config import load_config
-    from cvrp.pipeline.orchestrator import start
+    from vrpar.config import load_config
+    from vrpar.pipeline.orchestrator import start
 
     monkeypatch.chdir(project)
     config = load_config(project / "task.yaml", cwd=project)

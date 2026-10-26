@@ -197,7 +197,7 @@ def generate_instance(
         "meta": {
             "seed": seed,
             "problem": "cvrpltw",
-            "generator": "cvrp.problems.cvrpltw.instances",
+            "generator": "vrpar.problems.cvrpltw.instances",
             "total_demand": round(sum(node_demand), 4),
             "min_vehicles_lower_bound": int(math.ceil(sum(node_demand) / float(capacity))),
             "time_semantics": "travel_time == distance; early arrival waits; late arrival infeasible",
@@ -423,7 +423,7 @@ def write_manifest(
     entries.sort(key=lambda entry: (int(entry.get("problem_size") or 0), str(entry.get("name") or "")))
     payload = {
         "problem": "cvrpltw",
-        "generator": "cvrp.problems.cvrpltw.instances",
+        "generator": "vrpar.problems.cvrpltw.instances",
         "count": len(entries),
         "sizes": sorted({int(entry.get("problem_size") or 0) for entry in entries}),
         "instances": entries,

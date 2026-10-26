@@ -1,6 +1,6 @@
 """CVRPTW problem plugin: the inference-time checks used by the pipeline.
 
-Loaded by ``cvrp.problems.load_problem``. Everything in this file is
+Loaded by ``vrpar.problems.load_problem``. Everything in this file is
 *independent* of the generated solver -- it re-implements the time semantics and
 recomputes every cost from the instance coordinates. That independence is the
 whole point: "no traceback" is not "correct", and only a second implementation
