@@ -1,0 +1,37 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+*.egg-info/
+
+# Test scratch. The suite writes here instead of the system temp dir, which is
+# not reliably writable in confined environments (see tests/conftest.py).
+.test-tmp/
+.pytest-tmp/
+pytest-cache-files-*/
+
+# Runtime output: every `vrpar start` creates results/<task>/<timestamp>/.
+results/
+
+# Generated instances, reproducible from the selected problem's instances.py.
+# Keep the generator; the .json/.vrp payloads are throwaway.
+instances/data/
+
+# S6 export target. Re-created on every successful run.
+workspace/final/*
+!workspace/final/.gitkeep
+
+# Agents' scratch working copies.
+workspace/worktrees/
+
+# No weight files are shipped: every run trains its own checkpoint.
+
+
+# Cross-run records: the durable knowledge base (records/main) is worth committing;
+# per-run temp evidence and retrieval selections are not.
+records/temp/
+records/related/

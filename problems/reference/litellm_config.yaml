@@ -1,0 +1,38 @@
+# CVRPLTW 的 litellm_config.yaml 参考模板。
+#
+# 放在 problems/<slug>/litellm_config.yaml。
+# 这里只放环境与运行预算；题目本身在 task.yaml。
+
+stages: default
+
+# 分数来自 test_n 的 AUGMENTATION SCORE；POMO 的 score 是 cost 型，越低越好。
+score:
+  direction: minimize
+
+loop:
+  max_rounds: 5
+
+llm:
+  # 可选：claude_code / dsh / mock
+  backend: "dsh"
+  runtime: "dsh"
+  dsh_bin: "dsh"
+  inherit_routing_env: true
+  timeout_seconds: 3600
+  runtime_options:
+    profile: "headless"
+    permission_mode: "workspace-write"
+    tools_mode: "native"
+    patch: []
+
+workspace:
+  results_dir: "./results"
+  final_dir: "./workspace/final"
+  setup:
+    - ["uv pip install torch --index-url https://download.pytorch.org/whl/cu126",
+       "uv pip install torch --index-url https://download.pytorch.org/whl/cpu"]
+
+run:
+  verbose: false
+  ui: false
+  session: "local"

@@ -1,0 +1,26 @@
+stages: default
+llm:
+  backend: dsh
+  runtime: dsh
+  dsh_bin: dsh
+  inherit_routing_env: true
+  timeout_seconds: 3600
+  runtime_options:
+    profile: headless
+    permission_mode: workspace-write
+    tools_mode: native
+    patch: []
+workspace:
+  results_dir: ./results
+  final_dir: ./workspace/final
+  setup:
+  - - uv pip install torch --index-url https://download.pytorch.org/whl/cu126
+    - uv pip install torch --index-url https://download.pytorch.org/whl/cpu
+run:
+  verbose: false
+  ui: false
+  session: local
+score:
+  direction: minimize
+loop:
+  max_rounds: 5

@@ -1,0 +1,32 @@
+# Global defaults for every `vrpar start` run.
+#
+# Precedence: task.yaml  >  litellm_config.yaml  >  configs/default.yaml  >  built-in.
+# Any key may also be overridden on the command line with dotlist syntax:
+#   uv run vrpar start problems/cvrptw/task.yaml llm.backend=mock
+
+llm:
+  backend: "claude_code"
+  runtime: "claude_code"
+  model: "deepseek-flash"
+  claude_bin: "claude"
+  max_turns: 0
+  permission_mode: "auto"
+  extra_args: []
+  inherit_routing_env: true
+  env: {}
+  timeout_seconds: 3600
+
+loop:
+  max_rounds: 5
+
+score:
+  direction: minimize
+
+workspace:
+  results_dir: "./results"
+  final_dir: "./workspace/final"
+
+run:
+  verbose: true
+  ui: false
+  session: "local"
