@@ -1,0 +1,7 @@
+# Keep text files LF in the repository so a clone behaves the same on Windows,
+# Linux and macOS. The shipped evaluation data is binary and must not be touched.
+* text=auto eol=lf
+*.pkl binary
+*.pt binary
+*.png binary
+*.jpg binary

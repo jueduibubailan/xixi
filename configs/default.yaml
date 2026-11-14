@@ -1,0 +1,60 @@
+# Global defaults for every `vrpar start` run.
+#
+# Precedence: task.yaml  >  litellm_config.yaml  >  configs/default.yaml  >  built-in.
+# Any key may also be overridden on the command line with dotlist syntax:
+#   uv run vrpar start problems/cvrptw/task.yaml llm.backend=mock
+
+llm:
+  backend: "claude_code"
+  runtime: "claude_code"
+  model: "deepseek-flash"
+  claude_bin: "claude"
+  max_turns: 0
+  permission_mode: "auto"
+  extra_args: []
+  inherit_routing_env: true
+  env: {}
+  timeout_seconds: 10800
+
+loop:
+  max_rounds: 3
+
+# nn improve: parameter search after the first acceptance run.
+# The pipeline generates at most `rounds` batches of `strategies_per_batch` strategy
+# plans plus `mutations_per_batch` mutations.  Every plan changes exactly one
+# parameter and is scored with the `search` protocol; the champion is re-run once
+# with `acceptance`.
+nn_improve:
+  enabled: true
+  rounds: 3
+  strategies_per_batch: 10
+  mutations_per_batch: 2
+  label_baseline: "initial-search"
+  min_delta: 0.0
+  strict_strategies: false
+  strategies_file: ""
+  max_repairs_per_plan: 1
+  on_invalid_plans: fail
+  stop_when_no_winner: true
+  base_pool_size: 10
+  space:
+    allow: ["model.*", "trainer.*", "encoder.*", "decoder.*"]
+    deny: ["scale.problem_size", "scale.pomo_size", "scale.aug_factor"]
+  search:
+    train_epochs: 50
+    train_episodes: 5000
+  acceptance:
+    train_epochs: 200
+    train_episodes: 5000
+
+score:
+  direction: minimize
+
+workspace:
+  results_dir: "./results"
+  final_dir: "./workspace/final"
+
+run:
+  verbose: true
+  ui: false
+  session: "local"
