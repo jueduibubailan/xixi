@@ -1,0 +1,14 @@
+task:
+  name: "CVRPLTW-on-POMO"
+
+  slug: "cvrpltw_reference"
+
+  description: |
+        问题的具体描述请完整阅读本目录下的 grader/problem_description.md 文件，请完整阅读。
+
+  tips: |
+      1、最后的训练代码的seed使用2023，测试代码的seed使用2024
+      2、测试代码务必使用我们上传的vrpltw50_uniform.pkl作为测试，保证测试结果的一致性
+      3、训练代码里面的'train_batch_size'为64
+      4、测试代码里面的`test_batch_size`为1000
+

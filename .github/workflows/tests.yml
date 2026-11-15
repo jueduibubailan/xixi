@@ -1,0 +1,24 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install uv
+        run: python -m pip install uv
+      - name: Install the project
+        run: uv sync --extra dev
+      - name: Lint
+        run: uv run ruff check src tests
+      - name: Validate the shipped bundle
+        run: uv run vrpar validate problems/mvmoe_ovrpl_n50/task.yaml
+      - name: Test
+        run: uv run pytest -q
