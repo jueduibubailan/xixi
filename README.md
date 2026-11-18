@@ -31,13 +31,10 @@ Requirements:
 uv sync --extra dev
 ```
 
-`torch` is intentionally not a project dependency: a real run installs it through the
-bundle's `workspace.setup` on the first `vrpar start`. The offline path needs no model
-runtime and no `torch`:
+The offline path needs no model runtime:
 
 ```bash
-uv run vrpar validate problems/mvmoe_ovrpl_n50/task.yaml
-uv run vrpar start problems/mvmoe_ovrpl_n50/task.yaml llm.backend=mock run.setup=false
+uv run vrpar start problems/mvmoe_ovrpl_n50/task.yaml llm.backend=mock
 ```
 
 For a real `dsh` run, put `DEEPSEEK_API_KEY` in the launching shell (or use the
@@ -55,7 +52,7 @@ problems/<slug>/
 |-- seed/                  # optional notes
 baseline/pomo/            # one shared POMO tree
 src/vrpar/                # engine
-docs/prompts_zh/          # Chinese translations of the prompts and roles
+scripts/                  # one-off tools: schema migration, final re-scoring
 problems/reference/       # CVRPLTW reference bundle (description + grader inputs)
 ```
 
@@ -128,6 +125,16 @@ The test data defaults to random instances (`test_data_load.enable = False`,
 `--model-path`. A `task.tips` entry may pin a fixed test set instead; then the
 generated entry loads that set and `test_episodes` equals its size.
 
+### Captured files and their encoding
+
+`code_error` captures both runs through a shell redirect, so the files under
+`artifacts/runs/<key>/` carry whatever encoding that shell used. Windows PowerShell
+5.1 writes `>` as UTF-16LE; bash, `pwsh` and `Out-File -Encoding utf8` write UTF-8.
+The acceptance gate, the dashboard's file viewer and the log viewer all go through
+`vrpar.run.run_dir.decode_text`, which sniffs the BOM, so either encoding scores and
+renders correctly. The stage prompt still asks for UTF-8, because a UTF-16 file shows
+up as mojibake in most other tools.
+
 ## Run directory
 
 ```
@@ -146,6 +153,7 @@ results/<slug>/<run-id>/
 |   |-- initial/generated/               # fallback code
 |   |-- best/generated/                  # champion
 |   `-- winners/<plan-id>/generated/     # label=1 snapshots
+|-- config.resolved.json                 # the config this run used (written once)
 |-- logs/pipeline.log
 `-- state.json
 ```
@@ -167,8 +175,9 @@ plans:
 - a plan that beats `initial_search_score` gets label 1 and its code is kept under
   `winners/`; a better one replaces `best/`;
 - a batch with no winner stops the search;
-- the champion is re-run at the acceptance budget; if it does not beat the initial
-  acceptance score, the initial code is exported instead.
+- the champion is re-run at the acceptance budget; if it fails or does not beat the
+  initial acceptance score, the initial code is exported instead and `REPORT.md`
+  records why (`reason:` names the failure or the losing score).
 
 `artifacts/nn_improve/plans.json` is the ledger: `pending`, `running`,
 `completed`, `executed`, `failed`, plus `label` (1 = beat the threshold).
@@ -201,6 +210,29 @@ python test_n50.py --model-path ../checkpoint-200.pt    # initial / final (accep
 
 The champion's checkpoint is also exported; see below.
 
+## Re-scoring a finished run
+
+A final acceptance can train and test correctly and still be mis-parsed: the captured
+stdout was written in an encoding the gate did not read. The evidence is on disk, so
+there is no reason to retrain. Re-score it:
+
+```bash
+uv run python scripts/adopt_final_score.py --run <run-id> --dry-run   # gate result only
+uv run python scripts/adopt_final_score.py --run <run-id>             # adopt
+```
+
+The tool re-runs `gates.check_code_error` with the current reader and adopts the score
+only when the gate passes and that score beats `initial_score`. Adoption writes
+`final_score` to `plans.json` and `state.json`, updates the `code_error` stage record,
+rewrites `artifacts/runs/final/report.json` and `artifacts/runs/code_error_report.json`,
+restores the executed champion package, re-exports `workspace/final/<slug>/` and
+regenerates `REPORT.md`. `state.json`, `plans.json` and `REPORT.md` are copied to
+`*.pre-adopt` before anything is written.
+
+It never trains and never calls an agent. `--force` overrides the two safety checks;
+`--task` points at the bundle when `problems/<slug>/task.yaml` is not where the run
+came from.
+
 ## Export
 
 A successful run exports the package the final acceptance approved:
@@ -215,6 +247,9 @@ workspace/final/<task.slug>/
 The exporter picks `artifacts/nn_improve/best/generated` when the final acceptance
 beat the initial score, and `artifacts/nn_improve/initial/generated` otherwise.
 `result/`, caches and samples are excluded.
+
+The same export runs when a finished acceptance is re-scored; see
+[Re-scoring a finished run](#re-scoring-a-finished-run).
 
 ## Evaluation data
 
@@ -299,7 +334,7 @@ Any key can be overridden on the command line, e.g.
 
 - a complete `task.description`;
 - `litellm_config.yaml` shape;
-- [`plan_outline.md`](problems/reference/plan_outline.md) - what analysis should produce;
+- the root `reference/cvrpltw_plan_outline.md` - what analysis should produce;
 - MVMoE data/generator inputs.
 
 It is a template, not a required bundle; copy and adapt it for a new variant.
@@ -313,13 +348,16 @@ For `dsh`, keep the provider credential in the launching shell
 (`DEEPSEEK_API_KEY`); if the inherited DSH home is not writable, the backend uses
 a run-local `.dsh` without the credential store.
 
+## Troubleshooting
+
+| symptom | cause | fix |
+|---|---|---|
+| `the final test entry stdout has no 'AUGMENTATION SCORE:' line`, but the captured file ends with a score | the file is UTF-16 and something read it as UTF-8 | already handled by `decode_text`; for a run that ended before the fix, run the re-scoring tool above |
+| the dashboard shows `final (200)` as `—` although the run printed a score | the final acceptance was rejected (gate, or "not better than initial") | check `artifacts/runs/final/report.json` → `issues`; if the score line is the only problem, re-score it |
+
 ## Tests
 
 ```bash
 uv run pytest -q
 ```
-
-The suite runs offline and needs no model runtime. One baseline-import test is
-skipped when `torch` is not installed (the normal state after `uv sync --extra dev`);
-`workspace.setup` installs it for a real run.
 

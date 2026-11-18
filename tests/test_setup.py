@@ -13,8 +13,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from vrpar.executor.contract import import_probe
 from vrpar.run.setup import run_setup, setup_commands
 
@@ -205,12 +203,6 @@ def test_the_staged_baseline_imports_with_the_documented_bootstrap():
     """
     import subprocess
     import sys
-
-    pytest.importorskip(
-        "torch",
-        reason="torch is installed by `workspace.setup` for real runs; "
-        "install it to exercise this import check",
-    )
 
     from tests.conftest import PACKAGE_PROBLEMS, baseline_of
     from vrpar.problems import load_problem

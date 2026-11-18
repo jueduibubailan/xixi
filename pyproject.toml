@@ -1,7 +1,7 @@
 [project]
 name = "vrpar"
 version = "1.1.0"
-description = "VRP-variant code synthesis pipeline: analysis -> code generation -> code error -> adjustment -> nn improve, built on POMO, orchestrated by a sequential stage pipeline."
+description = "CVRP-variant code synthesis pipeline: analysis agent -> code generation agent -> error agent -> revise agent, built on POMO, orchestrated by a sequential stage pipeline."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }

@@ -259,7 +259,7 @@ def classify_error(text: str) -> str:
 
 
 def condense(text: str, limit: int = 4000) -> str:
-    """Keep the part of a traceback that an adjustment round actually needs."""
+    """Keep the part of a traceback that a revise agent actually needs."""
     if not text:
         return ""
     if len(text) <= limit:
@@ -421,7 +421,7 @@ def import_probe(
     is otherwise indistinguishable from "the generated code crashed": ``py_compile``
     passes (the syntax is fine) and the problem only shows up inside the smoke run.
     Importing the modules directly names the exact module and the exact missing
-    name, which is the difference between one repair round and three.
+    name, which is the difference between one revise round and three.
 
     The deliverable mirrors the baseline tree (``pomo/POMO/CVRPEnv.py``), so the walk
     is recursive and the import statement is computed from the path relative to the

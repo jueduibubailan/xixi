@@ -8,6 +8,11 @@ The operator's success condition is deliberately mechanical:
 4. that test entry stdout contains an ``AUGMENTATION SCORE:`` line.
 
 The score is the last such line.  No feasibility, no plan audit, no code review.
+
+The captured files are written by a stage agent through a shell redirect, so their
+encoding is whatever that shell used (Windows PowerShell 5.1 writes UTF-16LE for
+``>``).  Reading goes through :func:`vrpar.run.run_dir.decode_text`, which sniffs the
+BOM instead of assuming UTF-8.
 """
 
 from __future__ import annotations
@@ -16,6 +21,8 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from vrpar.run.run_dir import decode_text
 
 DEFAULT_PINS = {"epochs": 200, "train_episodes": 5000}
 TRAIN_PIN_TEMPLATE = r"['\"]{name}['\"]\s*:\s*{value}\b"
@@ -39,7 +46,7 @@ class TestCheck:
 
 def _read(path: Path) -> str:
     try:
-        return path.read_text(encoding="utf-8", errors="replace")
+        return decode_text(path.read_bytes())
     except OSError:
         return ""
 

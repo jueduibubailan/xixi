@@ -16,12 +16,11 @@
 ## 1. 目录
 
 ```
-problems/reference/
+problems/cvrpltw/
 ├─ task.yaml
 ├─ litellm_config.yaml
-├─ plan_outline.md         # analysis 应产出的 plan 结构
 ├─ grader/                 # 可选：checker / generator，只读输入
-└─ seed/                   # 可选：给 agent 的说明
+└─ instance_gen/           # 可选：生成器代码或生成文字描述，只读输入
 ```
 
 没有 `context.md`。
@@ -32,10 +31,10 @@ problems/reference/
 
 ```bash
 # 真实 agent
-uv run vrpar start problems/reference/task.yaml
+uv run vrpar start problems/cvrpltw/task.yaml
 
-# 离线检查配置与流水线（不需要模型；mock 也不需要 torch）
-uv run vrpar start problems/reference/task.yaml llm.backend=mock run.setup=false
+# 离线检查配置与流水线（不需要模型）
+uv run vrpar start problems/cvrpltw/task.yaml llm.backend=mock
 ```
 
 `vrpar start` 不带参数会直接报错。
@@ -48,12 +47,12 @@ uv run vrpar start problems/reference/task.yaml llm.backend=mock run.setup=false
 
 ```text
 artifacts/generated/test_train.py
-artifacts/runs/<key>/test_train.stdout.txt
-artifacts/runs/<key>/test_train.stderr.txt
-artifacts/runs/<key>/test_train.exitcode
-artifacts/runs/<key>/test.stdout.txt
-artifacts/runs/<key>/test.stderr.txt
-artifacts/runs/<key>/test.exitcode
+artifacts/runs/test_train.stdout.txt
+artifacts/runs/test_train.stderr.txt
+artifacts/runs/test_train.exitcode
+artifacts/runs/test_n.stdout.txt
+artifacts/runs/test_n.stderr.txt
+artifacts/runs/test_n.exitcode
 ```
 
 成功条件：
@@ -93,7 +92,6 @@ artifacts/runs/<key>/test.exitcode
 
 ## 5. 文件
 
-- [`task.yaml`](task.yaml) — 可直接参考/复制的 task 描述
-- [`litellm_config.yaml`](litellm_config.yaml) — 环境与预算
-- [`plan_outline.md`](plan_outline.md) — analysis 应产出的 plan 结构
-- [`grader/problem_description.md`](grader/problem_description.md) — 更完整的 CVRPLTW 题目说明
+- [`cvrpltw_task.yaml`](cvrpltw_task.yaml) — 可直接参考/复制的 task 描述
+- [`cvrpltw_litellm_config.yaml`](cvrpltw_litellm_config.yaml) — 环境与预算
+- [`cvrpltw_plan_outline.md`](cvrpltw_plan_outline.md) — analysis 应产出的 plan 结构

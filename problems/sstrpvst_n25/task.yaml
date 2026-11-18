@@ -1,0 +1,24 @@
+task:
+  name: "SSTRPVST-n15-25 (arXiv:2308.14744)"
+
+  slug: "sstrpvst_n25"
+
+  description: |
+      题目是"带可变服务时间的同步喷洒车-补给车路径问题"（SSTRPVST），
+      出处 arXiv:2308.14744 的 §3–§4。
+      完整的问题定义、实例字段、目标函数、约束清单、解的形式、评分口径，
+      全部在 grader/sstrpvst的问题描述.md 里，请**完整阅读**后再写 plan。
+
+  tips: |
+      1、训练代码的 seed 用 2023，测试代码的 seed 用 2024。
+      2、测试集必须加载我们上传的 grader/data/sstrp_n25_uniform.pkl（1000 条，
+         已固定种子）。test_episodes = 1000，test_data_load.enable = True，
+         不要再用随机生成的测试数据。
+      3、train_batch_size = 64，test_batch_size = 1000。
+      4、AUGMENTATION SCORE 打印的是**目标函数值**（式 (1)），越小越好；
+         不要打印 reward，也不要把负号弄反。目标值可能为负，属正常。
+      5、测试时请把每个实例的解 dump 到该次运行的
+         artifacts/runs/<key>/solutions.jsonl（每行一个 JSON，格式见描述文档
+         §7）。这只用于离线复核，不影响评分；但强烈建议保留。
+      6、pkl 里已经给了 K、Qs、Qr、xi、eta、beta、speed，**不要重新采样**，
+         直接用实例里的值。

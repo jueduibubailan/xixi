@@ -4,7 +4,7 @@ task:
   slug: "cvrpltw_reference"
 
   description: |
-        问题的具体描述请完整阅读本目录下的 grader/problem_description.md 文件，请完整阅读。
+        问题的具体描述请完整阅读本目录下的grader\problem_description.md文件，请完整阅读。
 
   tips: |
       1、最后的训练代码的seed使用2023，测试代码的seed使用2024

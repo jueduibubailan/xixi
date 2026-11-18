@@ -26,13 +26,14 @@ from vrpar.pipeline import gates
 from vrpar.pipeline.spec import STAGE_INPUTS
 from vrpar.pipeline.stages import run_agent_stage
 from vrpar.problems import ProblemPlugin
-from vrpar.run.run_dir import append_log, make_run_dir, write_json
+from vrpar.run.run_dir import append_log, make_run_dir, read_json, write_json
 from vrpar.run.setup import run_setup
 from vrpar.run.state import DONE, FAILED, RunState
 from vrpar.run.worktree import (
     collect_artifacts,
     find_checkpoint,
     prune_generated,
+    restore_generated,
     seed_worktree,
     snapshot_tree,
 )
@@ -92,7 +93,11 @@ class Orchestrator:
         from vrpar.llm.base import make_backend
 
         self.backend = make_backend(llm_config, problem=self.problem)
-        write_json(self.run_dir / "config.resolved.json", _serializable_config(config), default=str)
+        # Only a fresh run records its config. Opening an existing run (resume, replay,
+        # re-scoring) must not rewrite the evidence with a config the run never used.
+        resolved = self.run_dir / "config.resolved.json"
+        if not resolved.is_file():
+            write_json(resolved, _serializable_config(config), default=str)
 
     def log(self, message: str) -> None:
         append_log(self.log_path, message)
@@ -468,9 +473,9 @@ class Orchestrator:
         if nn["enabled"] and nn["rounds"] > 0:
             self._nn_loop(search, nn)
 
-        self._finalise_champion(acceptance)
+        reason = self._finalise_champion(acceptance)
         self.state.finish("completed")
-        return self._finalize(success=True, reason="")
+        return self._finalize(success=True, reason=reason)
 
     def resume(self) -> dict[str, Any]:
         """Continue an interrupted run from its ledger.
@@ -544,11 +549,12 @@ class Orchestrator:
             self.log("resume: final acceptance was already attempted; not re-running it")
             if self.ledger.get("final_score") is None:
                 self._restore_run_generated(self._initial_dir())
+            reason = ""
         else:
-            self._finalise_champion(acceptance)
+            reason = self._finalise_champion(acceptance)
 
         self.state.finish("completed")
-        return self._finalize(success=True, reason="")
+        return self._finalize(success=True, reason=reason)
 
     def _acceptance_loop(self, spec: EvalSpec) -> gates.TestCheck:
         rounds = max(1, int(loop_config(self.config).get("max_rounds") or 3))
@@ -747,15 +753,21 @@ class Orchestrator:
         self.state.set_best(plan["score"], plan["id"])
         self.log(f"new champion: {plan['id']} score={plan['score']}")
 
-    def _finalise_champion(self, spec: EvalSpec) -> None:
+    def _finalise_champion(self, spec: EvalSpec) -> str:
+        """Re-run the champion once with the acceptance protocol and export it.
+
+        Returns the reason to put in ``REPORT.md``; an empty string means the
+        champion was accepted, so the default "acceptance + final test passed"
+        wording applies.
+        """
         if self.ledger is None:
-            return
+            return ""
         if self.ledger.get("best_plan_id") is None:
             self.log("no plan ever won; exporting the initial code")
             self.ledger["final_attempted"] = True
             self._save_ledger()
             self._restore_run_generated(self._initial_dir())
-            return
+            return "no plan ever won; exported the initial code"
         self._restore_run_generated(self._best_dir())
         self.log("--- final acceptance: champion re-run ---")
         check, _ = self.stage_code_error(spec, "final")
@@ -766,13 +778,24 @@ class Orchestrator:
             self.state.set_final(check.score)
             self._save_ledger()
             self.log(f"champion accepted: final={check.score}")
-            return
-        self.log("champion did not beat the initial code; falling back to it")
+            return ""
+        if check.passed:
+            reason = (
+                f"champion scored {check.score}, which is not better than the initial "
+                f"{initial}; exported the initial code"
+            )
+        else:
+            reason = (
+                "final acceptance failed (" + "; ".join(check.issues[:2]) + "); "
+                "exported the initial code"
+            )
+        self.log(f"champion rejected: {reason}")
         self.ledger["final_score"] = None
         self.ledger["final_attempted"] = True
         self.state.set_final(None)
         self._save_ledger()
         self._restore_run_generated(self._initial_dir())
+        return reason
 
     # -- export / report -------------------------------------------------- #
 
@@ -915,6 +938,7 @@ def replay_stage(config: dict[str, Any], run_dir: Path, stage: str, results_dir:
         check, _ = orchestrator.stage_code_error(eval_spec(config, "acceptance"), "replay")
         result = StageResult("code_error", check.passed, list(check.issues))
     elif stage == "code_adjustment":
+        report = read_json(run_dir / "artifacts" / "runs" / "code_error_report.json", default={}) or {}
         result = orchestrator.stage_code_adjustment(
             "repair",
             report_key="replay",

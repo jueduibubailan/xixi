@@ -1,4 +1,4 @@
-"""vrpar - VRP-variant code synthesis (analysis -> codegen -> error -> adjustment -> nn improve).
+"""vrpar - CVRP-variant code synthesis pipeline (analysis -> codegen -> error -> revise).
 
 Public entry point: ``vrpar.cli:main`` (console script ``vrpar``).
 """

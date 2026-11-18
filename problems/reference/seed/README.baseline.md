@@ -1,8 +1,20 @@
-# Baseline note
+# The seed is shared with `problems/cvrpltw/`
 
-The baseline is the shared POMO tree at `baseline/`; this bundle carries only its data
-(`grader/`) and its description. Every run seeds a worktree from the shared tree and
-trains its own weights — no checkpoint is shipped.
+`task.yaml` sets:
+
+```yaml
+resources:
+  baseline_dir: "baseline"
+  baseline_subdirs: [pomo]
+```
+
+so the worktree is seeded from the project's shared `baseline/`, not from this
+directory. That is deliberate: `pomo/` is a reference baseline, not an answer, and no
+weight file is shipped at all -- every run trains its own.
 
 This file exists so the directory is not empty (an empty directory does not survive a
 git checkout) and so the indirection is documented where someone will look for it.
+
+
+This file exists so the directory is not empty (an empty directory does not survive a git
+checkout) and so the indirection is documented where someone will look for it.

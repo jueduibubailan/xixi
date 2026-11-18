@@ -1,6 +1,6 @@
 # MVMoE — vendored instance generation
 
-Upstream project: **Routing-MVMoE** (MVMoE, ICML 2024), MIT License
+Upstream project: **Routing-MVMoE** (`D:\PyProject\Routing-MVMoE-main`), MIT License
 (see `LICENSE`, Copyright (c) 2023 Jianan).
 
 These files are copied **verbatim**. They are here because this bundle's evaluation set is

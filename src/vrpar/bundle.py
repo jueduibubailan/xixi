@@ -133,7 +133,7 @@ def expand_defaults(spec: dict[str, Any]) -> dict[str, Any]:
 
     Two shorthands keep a task file honest and short:
 
-    * `stages: default` -> `vrpar.config.STAGES` (the five stages, with roles, prompt keys
+    * `stages: default` -> `vrpar.config.STAGES` (the seven stages, with roles, prompt keys
       and timeouts);
     * a missing `loop:` -> `vrpar.config.DEFAULT_LOOP`.
 

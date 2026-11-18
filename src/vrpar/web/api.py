@@ -15,7 +15,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
 from vrpar.config import task_slug
-from vrpar.run.run_dir import latest_run_dir, read_json
+from vrpar.run.run_dir import decode_text, latest_run_dir, read_json
 from vrpar.run.state import RunState
 
 TEXT_SUFFIXES = {".md", ".txt", ".log", ".json", ".py", ".yaml", ".yml", ".csv"}
@@ -200,7 +200,9 @@ async def get_file(request: Request) -> Response:
     if target.stat().st_size > MAX_TEXT_BYTES:
         return _json({"error": "file too large to display", "size": target.stat().st_size}, status=413)
     try:
-        text = target.read_text(encoding="utf-8", errors="replace")
+        # A stage's captured stdout may be UTF-16 (Windows PowerShell redirect); the
+        # viewer and the acceptance gate must read it the same way.
+        text = decode_text(target.read_bytes())
     except OSError as exc:
         return _json({"error": str(exc)}, status=500)
     return _json({"path": relative, "text": text})
@@ -231,7 +233,7 @@ async def get_log(request: Request) -> Response:
     target = context.safe_path(run_dir, f"logs/{name}")
     if target is None or not target.is_file():
         return _json({"error": f"no such log: {name}"}, status=404)
-    text = target.read_text(encoding="utf-8", errors="replace")
+    text = decode_text(target.read_bytes())
     tail = int(request.query_params.get("tail") or 0)
     if tail > 0:
         text = "\n".join(text.splitlines()[-tail:])

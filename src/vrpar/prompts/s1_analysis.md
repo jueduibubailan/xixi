@@ -51,8 +51,7 @@ enough for code_generation to start without asking you anything.
     the generated data and compare its statistics against the description).
 
   - **c. It contains neither.** Design the generation yourself: state the
-    distribution, the parameters, the fields, the seed and how it is reproduced —
-    **and answer where the data in `data/instances/` comes from when the executor
+    distribution, the parameters, the fields, the seed and how it is reproduced —     **and answer where the data in `data/instances/` comes from when the executor
     runs**, otherwise the run has nothing to evaluate.
 
   Either way, `plan.md` must state the data source, the generation parameters,

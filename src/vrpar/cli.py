@@ -1,21 +1,22 @@
 """vrpar command line.
 
-    uv run vrpar start problems/<slug>/task.yaml            # run the whole pipeline
-    uv run vrpar start problems/<slug>/task.yaml --resume results/<slug>/<run-id>
+    uv run vrpar start task.yaml            # run the whole pipeline
+    uv run vrpar start task.yaml --resume results/<slug>/<run-id>   # continue one
     uv run vrpar ui                         # dashboard at http://127.0.0.1:8420
-    uv run vrpar problems                   # list the bundles this project can build
+        uv run vrpar problems                   # list the variants this project can build
     uv run vrpar status                     # one-screen run summary
     uv run vrpar log [-n 100]               # tail the pipeline log
     uv run vrpar show <path>                # print an artifact
+    uv run vrpar score [--json]             # re-run the score check
     uv run vrpar instances [--force]        # (re)generate the problem's data
     uv run vrpar validate                   # config + problem + prompt check
-    uv run vrpar doctor                     # runtime prerequisites
     uv run vrpar clean [--all]              # drop run directories
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
 import sys
 from pathlib import Path
@@ -231,21 +232,15 @@ def cmd_problems(args: argparse.Namespace) -> int:
     """List the variants this project can build."""
     from vrpar.problems import ProblemError, find_problem_dir, list_problems, load_problem
 
-    if getattr(args, "task", None):
-        try:
-            config: dict[str, Any] = _load(args)
-        except ConfigError:
-            config = {"_project_root": str(Path.cwd())}
-    else:
-        # `vrpar problems` is a discovery command: it must work before a task exists.
+    try:
+        config: dict[str, Any] = _load(args)
+    except ConfigError:
         config = {"_project_root": str(Path.cwd())}
 
     slugs = list_problems(config)
     if not slugs:
-        print("no problem directories found; copy problems/reference and edit its task.yaml")
+        print("no problem directories found; copy problems/cvrptw and edit its task.yaml")
         return 1
-    from vrpar.bundle import read_task_file
-
     print(f"{'slug':<20}{'name':<44}{'generated dir':<24}prompts")
     print("-" * 100)
     for slug in slugs:
@@ -255,12 +250,9 @@ def cmd_problems(args: argparse.Namespace) -> int:
         except ProblemError as exc:
             print(f"{slug:<20}!! {exc}")
             continue
-        spec = read_task_file(root / "task.yaml")
-        task_name = str((spec.get("task") or {}).get("name") or plugin.name)
         prompts = plugin.spec.get("prompts") or {}
-        prompt_label = f"{len(prompts)} declared" if prompts else "engine defaults"
         gen_dir = (plugin.spec.get("generated") or {}).get("dir", "artifacts/generated")
-        print(f"{slug:<20}{task_name[:42]:<44}{str(gen_dir):<24}{prompt_label}")
+        print(f"{slug:<20}{plugin.name[:42]:<44}{str(gen_dir):<24}{len(prompts)} declared")
     return 0
 
 
@@ -327,48 +319,26 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     in that the agent CLI was never on the path of the process that `uv run` spawns.
     This command answers that in one shot.
     """
-    from vrpar.pipeline.stages import stage_prompt_path
+    from vrpar.llm.claude_code import _clean_env, resolve_claude_binary, routing_summary
 
     config = _load(args)
     problem = config["_problem"]
     llm = dict(config.get("llm") or {})
-    backend = str(llm.get("backend") or "claude_code").lower()
+    backend = str(llm.get("backend") or "claude_code")
     ok = True
 
     print(f"task     : {(config.get('task') or {}).get('name')}")
     print(f"project  : {project_root(config)}")
     print(f"problem  : {problem.slug}  ({problem.root})")
-    print(f"model    : {llm.get('model') or '(profile/default)'} via {backend}")
+    print(f"model    : {llm.get('model')} via {backend}")
     print()
 
     # 1. the agent CLI and where its traffic goes
     if backend in ("mock", "offline", "dry-run"):
-        print("agent CLI: not needed (offline mock backend)")
-    elif backend in ("dsh", "deepseek", "deepseek_harness", "deepseek-harness"):
-        from vrpar.llm.dsh import describe_environment, resolve_dsh_binary
-
-        options = dict(llm.get("runtime_options") or {})
-        binary = str(options.get("command") or llm.get("dsh_bin") or "dsh")
-        try:
-            resolved = resolve_dsh_binary(binary)
-            print(f"agent CLI: OK  {resolved}")
-        except FileNotFoundError as exc:
-            ok = False
-            print(f"agent CLI: MISSING - {exc}")
-            print("           install DSH (`npm install --global @deepseek-ai/dsh`) and put it on")
-            print("           PATH, set llm.dsh_bin / llm.runtime_options.command, or use")
-            print("           llm.backend=mock for an offline check.")
-        info = describe_environment()
-        print(f"           DEEPSEEK_API_KEY: {info['DEEPSEEK_API_KEY']}")
-        print(f"           DEEPSEEK_BASE_URL: {info['DEEPSEEK_BASE_URL']}")
+        print("agent CLI: not needed (backend is the offline stub)")
     else:
-        from vrpar.llm.claude_code import _clean_env, resolve_claude_binary, routing_summary
-
         binary = str(llm.get("claude_bin") or "claude")
-        env = _clean_env(
-            dict(llm.get("env") or {}),
-            inherit_routing=bool(llm.get("inherit_routing_env", True)),
-        )
+        env = _clean_env(dict(llm.get("env") or {}), inherit_routing=bool(llm.get("inherit_routing_env", True)))
         routing = routing_summary(env)
         try:
             resolved = resolve_claude_binary(binary)
@@ -379,8 +349,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             print("           every agent stage will fail with rc=127, and the gates will")
             print("           report that no output was produced. Fix it with one of:")
             print("             - install the CLI and make sure it is on PATH for this shell")
-            print("             - uv run vrpar start <task> llm.claude_bin=<absolute path>")
-            print("             - uv run vrpar start <task> llm.backend=mock   (offline)")
+            print("             - uv run vrpar start task.yaml llm.claude_bin=<absolute path>")
+            print("             - uv run vrpar start task.yaml llm.backend=mock   (offline)")
         print(f"routing  : {routing}")
         if not env.get("ANTHROPIC_BASE_URL") and llm.get("inherit_routing_env", True) is False:
             ok = False
@@ -397,60 +367,53 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         if getattr(args, "probe", False):
             from vrpar.llm.probe import print_probe
 
-            probe_ok, text = print_probe(
-                env, str(llm.get("model") or ""), timeout=float(args.probe_timeout)
-            )
+            probe_ok, text = print_probe(env, str(llm.get("model") or ""), timeout=float(args.probe_timeout))
             print(text)
             if not probe_ok:
                 ok = False
 
-    # 2. the shared baseline the agents adapt
-    baseline = project_root(config) / "baseline" / "pomo"
-    if baseline.is_dir():
+    # 2. the data the executor runs on
+    data_dir = resolve_path(config, problem.data_dir_name)
+    if problem.data_ready(data_dir):
+        print(f"data     : OK  {data_dir}")
+    else:
+        ok = False
+        print(f"data     : MISSING - expected a marker under {data_dir}")
+        print("           fix: uv run vrpar instances")
+
+    # 3. the baseline the agents must modify
+    from vrpar.run.worktree import _baseline_dir
+
+    baseline = _baseline_dir(problem)
+    if baseline is None:
+        print("baseline : none declared (the problem is expected to bring its own code)")
+    elif baseline.is_dir():
         entries = sorted(item.name for item in baseline.iterdir())
         print(f"baseline : OK  {baseline}  [{', '.join(entries[:6])}]")
     else:
         ok = False
-        print(f"baseline : MISSING - expected the shared POMO tree under {baseline}")
+        print(f"baseline : MISSING - resources.baseline_dir resolved to {baseline}")
 
-    # 3. the statement the analysis agent reads
-    description = str((config.get("task") or {}).get("description") or "").strip()
-    if description:
-        print(f"task     : OK  {len(description)} characters in task.description")
-    else:
+    # 4. the prompts the agents will be given
+    prompts = problem.spec.get("prompts") or {}
+    if not prompts:
         ok = False
-        print("task     : MISSING - task.description is empty")
-
-    # 4. the prompts and roles the agents will be given
-    agent_stages = [s for s in config.get("stages", []) if s.get("kind") == "agent"]
-    missing: list[str] = []
-    for stage in agent_stages:
-        prompt = stage_prompt_path(stage, config)
-        if prompt is None or not Path(prompt).is_file():
-            missing.append(f"{stage['name']}.prompt")
-        role = resolve_path(config, str(stage.get("role") or ""))
-        if not role.is_file():
-            missing.append(f"{stage['name']}.role")
-    if missing:
-        ok = False
-        print(f"prompts  : MISSING for {', '.join(missing)}")
+        print("prompts  : MISSING - the problem declares none, so the agents would be told nothing")
     else:
-        print(f"prompts  : OK  {len(agent_stages)} stage prompt(s) and role(s)")
+        missing = [key for key in prompts if not Path(problem.prompt(key)).is_file()]
+        if missing:
+            ok = False
+            print(f"prompts  : MISSING for {', '.join(missing)}")
+        else:
+            print(f"prompts  : OK  {len(prompts)} declared, all present")
 
-    # 5. the test data: a fixed set is optional, random instances are the default
-    data_dir = problem.root / "grader" / "data"
-    pkls = sorted(data_dir.glob("*.pkl")) if data_dir.is_dir() else []
-    if pkls:
-        print(f"test data: fixed set  {pkls[0].name} ({len(pkls)} file(s) under {data_dir})")
-    else:
-        print("test data: random instances (no grader/data/*.pkl pinned)")
-
-    setup = (config.get("workspace") or {}).get("setup") or []
-    print(f"setup    : {len(setup)} step(s) declared" if setup else "setup    : none declared")
+    # 5. the generated-package expectations, so the contract is runnable
+    print(f"program  : {problem.program_relpath}   (instance flag {problem.cli.get('path_arg') or 'none'})")
+    print(f"expected : {', '.join(problem.spec.get('program', {}).get('expected_lines') or ['(none declared)'])}")
     print()
 
     if ok:
-        print("all set - `uv run vrpar start <task>` should reach a graded result")
+        print("all set - `uv run vrpar start task.yaml` should reach a graded result")
     else:
         print("not ready - fix the items marked MISSING above")
     return 0 if ok else 1
@@ -558,14 +521,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="vrpar",
         description=(
-            "VRP-variant code synthesis: analysis -> codegen -> error -> adjustment "
-            "-> nn improve, driven by problems/<slug>/"
+            "VRP-variant code synthesis: analysis -> codegen -> error -> revise, "
+            "driven by problems/<slug>/"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "examples:\n"
-            "  uv run vrpar start problems/<slug>/task.yaml\n"
-            "  uv run vrpar start problems/<slug>/task.yaml llm.backend=mock run.setup=false\n"
+            "  uv run vrpar start task.yaml\n"
+            "  uv run vrpar start task.yaml llm.backend=mock run.verbose=true\n"
             "  uv run vrpar problems\n"
             "  uv run vrpar ui --port 8420\n"
         ),
@@ -619,7 +582,7 @@ def build_parser() -> argparse.ArgumentParser:
             "examples:\n"
             "  uv run vrpar stage analysis                     # replay S1 on the latest run\n"
             "  uv run vrpar stage code_error --run 20261006-191954\n"
-            "  uv run vrpar stage analysis --task problems/<slug>/task.yaml\n"
+            "  uv run vrpar stage analysis --task configs/tasks/cvrptw.yaml\n"
         ),
     )
     p_stage.add_argument("stage", nargs="?", choices=list(STAGE_CHOICES), help="which stage to replay")

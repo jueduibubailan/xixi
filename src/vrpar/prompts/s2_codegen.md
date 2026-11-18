@@ -77,5 +77,5 @@ Do not copy `pomo/` into the deliverable; the export step adds it.
 - Do not silently drop a masking rule you disagree with: **implement it**, then
   record your disagreement in the final summary.
 - Model hyperparameters live in POMO's `model_params`. `train_n<n>.py` and
-  `test_n<n>.py` must declare the **same** values, so that a later single-method
+  `test_n<n>.py` must declare the **same** values, so that a later single-parameter
   change cannot make the checkpoint and the tester disagree.

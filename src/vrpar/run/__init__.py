@@ -2,6 +2,7 @@
 
 from vrpar.run.run_dir import (
     append_log,
+    decode_text,
     latest_run_dir,
     make_run_dir,
     read_json,
@@ -22,6 +23,7 @@ from vrpar.run.state import (
 
 __all__ = [
     "append_log",
+    "decode_text",
     "latest_run_dir",
     "make_run_dir",
     "read_json",

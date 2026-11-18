@@ -1,13 +1,12 @@
 """The pipeline every task runs.
 
-Five stages, one straight line:
+Four stages, one straight line:
 
-    analysis -> code_generation -> code_error -> code_adjustment -> nn_improve
+    analysis -> code_generation -> code_error -> code_adjustment
 
 Agents do the work.  The pipeline itself only seeds worktrees, renders the
-instruction file, runs the nn-improve search loop, checks the three things the
-operator asked for (the two training pins, the exit code and the score line) and
-prints the score.
+instruction file, checks the three things the operator asked for (the two
+training pins, the exit code and the score line) and prints the score.
 """
 
 from __future__ import annotations

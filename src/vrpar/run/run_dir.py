@@ -133,11 +133,38 @@ def append_log(path: Path, message: str) -> None:
         fh.write(f"[{stamp}] {message}\n")
 
 
+#: Byte-order marks a child process may leave in front of a captured text file.
+#: Longest first: a UTF-32LE BOM starts with the UTF-16LE one.
+_BOMS: tuple[tuple[bytes, str], ...] = (
+    (b"\xff\xfe\x00\x00", "utf-32"),
+    (b"\x00\x00\xfe\xff", "utf-32"),
+    (b"\xef\xbb\xbf", "utf-8-sig"),
+    (b"\xff\xfe", "utf-16"),
+    (b"\xfe\xff", "utf-16"),
+)
+
+
+def decode_text(raw: bytes) -> str:
+    """Decode captured file bytes, whatever encoding the writing shell chose.
+
+    Every stage captures a child program's output through a shell redirect, and
+    Windows PowerShell 5.1 writes ``>`` (and ``Out-File`` without ``-Encoding``) as
+    UTF-16LE with a BOM while everything else here writes UTF-8. Reading such a file
+    as UTF-8 yields NUL-separated mojibake, so a perfect run looks like "the test
+    entry never printed the score". Sniffing the BOM is enough to read both, and it
+    costs nothing when the producer is well behaved.
+    """
+    for bom, encoding in _BOMS:
+        if raw.startswith(bom):
+            return raw.decode(encoding, errors="replace")
+    return raw.decode("utf-8", errors="replace")
+
+
 def read_text(path: Path, max_chars: int = 200_000) -> str:
     path = Path(path)
     if not path.is_file():
         return ""
-    text = path.read_text(encoding="utf-8", errors="replace")
+    text = decode_text(path.read_bytes())
     if len(text) > max_chars:
         return text[:max_chars] + f"\n\n[TRUNCATED: original length={len(text)} chars]"
     return text

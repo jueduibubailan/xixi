@@ -37,22 +37,34 @@ Do not modify the other generated files. If `test_train.py` itself has a bug, fi
 ## Run and capture
 
 Run from `artifacts/generated/`, writing into the absolute report directory
-`{report_dir}` (create it if missing):
+`{report_dir}` (create it if missing).
+
+Capture stdout as **UTF-8**. A bare `>` in Windows PowerShell 5.1 writes UTF-16LE,
+which the pipeline would have to sniff for and which other tools show as mojibake,
+so use the shell-specific form below.
+
+Bash:
 
     python test_train.py > {report_dir}/test_train.stdout.txt 2> {report_dir}/test_train.stderr.txt
+    echo $? > {report_dir}/test_train.exitcode
 
-Then write the exit code (bash / PowerShell both accepted):
+PowerShell (`powershell` 5.1 or `pwsh`):
 
-    echo $? > {report_dir}/test_train.exitcode          # bash
-    $LASTEXITCODE | Out-File -Encoding ascii {report_dir}/test_train.exitcode   # PowerShell
+    python test_train.py 2> {report_dir}/test_train.stderr.txt | Out-File -Encoding utf8 {report_dir}/test_train.stdout.txt
+    $LASTEXITCODE | Out-File -Encoding ascii {report_dir}/test_train.exitcode
 
-Read the file back and confirm it contains one integer.
+Read the exit-code file back and confirm it contains one integer.
 
 Then locate `checkpoint-{eval_epochs}.pt` (in POMO's result folder) and run the actual
 final test entry, for example:
 
     python test_n50.py --model-path <checkpoint-{eval_epochs}.pt> > {report_dir}/test.stdout.txt 2> {report_dir}/test.stderr.txt
     echo $? > {report_dir}/test.exitcode
+
+In PowerShell, use the same pattern as for `test_train.py`:
+
+    python test_n50.py --model-path <checkpoint-{eval_epochs}.pt> 2> {report_dir}/test.stderr.txt | Out-File -Encoding utf8 {report_dir}/test.stdout.txt
+    $LASTEXITCODE | Out-File -Encoding ascii {report_dir}/test.exitcode
 
 Use the file you actually found; do not run a literal `test_n.py`.
 
